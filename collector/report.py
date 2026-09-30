@@ -33,6 +33,7 @@ from group import group as group_findings, moments as by_moment, name_nodes
 from notify import changes_before
 from verdict import Verdict, evaluate
 import resolutions
+import catalog
 import sizing
 from profile import times_before
 from watchdog import STALE_AFTER_HOURS
@@ -847,6 +848,16 @@ h2 { font-size: 1.0625rem; margin: 2rem 0 0.8rem; }
 """
 
 INCIDENT_CSS = """
+/* The catalog of checks. */
+article.rule { scroll-margin-top: 1rem; }
+article.rule:target { outline: 1px solid var(--signal); }
+code.rule-id { font-size: .75rem; color: var(--ink-faint); font-weight: 400; margin-left: .3rem; }
+p.speaks { font-size: .9375rem; color: var(--ink-soft); }
+p.speaks b { color: var(--ink); font-weight: 600; margin-right: .3rem; }
+p.metric-expr code { font-size: .75rem; color: var(--ink-faint); word-break: break-all; }
+ul.watched { margin: .4rem 0 .6rem; padding-left: 1.1rem; font-size: .9rem; }
+ul.watched code { font-size: .72rem; color: var(--ink-faint); word-break: break-all; }
+
 /* The add page: the one command to create the monitoring user, and the folded file option. */
 pre.snippet { background: var(--ground); border: 1px solid var(--edge); padding: .7rem .9rem;
               font-family: var(--mono); font-size: .8125rem; white-space: pre-wrap;
@@ -1158,6 +1169,8 @@ def card(g, cluster_id: str, findings: list[dict], chart_file, muted: set[str]) 
           <details>
             <summary>What to check next</summary>
             <p>{esc(f.get('check') or '')}</p>
+            <p><a href="../rules.html#{esc(catalog.anchor(g.rule))}">About this check</a> —
+               what it measures and why at that threshold.</p>
           </details>
           {hushed}
           {fix_form(g, "resolve")}
@@ -1527,7 +1540,9 @@ def page_incident(cluster_id: str, g, findings: list[dict], chart_file, now: dat
             <div><b>{len(g.nodes)}</b><span>node{'s' if len(g.nodes) != 1 else ''} affected</span></div>
           </div>
           <h2>What to check</h2>
-          <div class="advice">{esc(worst.get('check') or '')}</div>
+          <div class="advice">{esc(worst.get('check') or '')}
+            <p style="margin:.6rem 0 0"><a href="../../rules.html#{esc(catalog.anchor(g.rule))}"
+               >About this check</a></p></div>
           <h2>What each node was doing</h2>
           <p class="lede">One chart per member. If only one moved, the cause is on that host; if
             all of them did, it is the workload or something they share.</p>
@@ -1545,6 +1560,46 @@ def page_redirect(target: str) -> str:
     from a different set of findings may have linked to it."""
     return (f'<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" '
             f'content="0; url={esc(target)}"><a href="{esc(target)}">{esc(target)}</a>')
+
+
+def page_rules(now: datetime) -> str:
+    """Every check, grouped by what it watches, each at its own anchor so a finding can link
+    straight to the one that produced it."""
+    items = catalog.entries()
+    sections = []
+    for key, name in catalog.AREAS:
+        group = [e for e in items if e["area"] == key]
+        if not group:
+            continue
+        cards = []
+        for e in group:
+            listed = "".join(f"<li>{esc(i['title'])} <code>{esc(i['path'])}</code></li>"
+                             for i in e.get("items") or [])
+            reasoning = "".join(f"<p>{esc(p)}</p>" for p in (e.get("reasoning") or "").split("\n\n")
+                                if p.strip())
+            cards.append(f"""
+        <article class="finding rule" id="{esc(e['id'])}" data-sev="{esc(e['severity'])}">
+          <div class="sev">{esc(SEVERITY_LABEL.get(e['severity'], e['severity']))}</div>
+          <h3>{esc(e['title'])} <code class="rule-id">{esc(e['id'])}</code></h3>
+          <p>{esc(e['what'])}</p>
+          <p class="speaks"><b>Speaks when</b> {esc(e['how'])}</p>
+          {f'<p class="metric-expr"><code>{esc(e["metric"])}</code></p>' if e.get('metric') else ''}
+          {f'<ul class="watched">{listed}</ul>' if listed else ''}
+          {f'<details><summary>Why this threshold</summary>{reasoning}</details>' if reasoning else ''}
+          <details><summary>What to check</summary><p>{esc(e['check'])}</p></details>
+          {f'<p class="hint">Over a connection string, one sample every ten seconds: '
+           f'{esc(e["ten_seconds"])}.</p>' if e.get('ten_seconds') else ''}
+        </article>""")
+        sections.append(f"<h2>{esc(name)}</h2>{''.join(cards)}")
+    thresholds = sum(1 for e in items if e["kind"] == "threshold")
+    body = f"""
+    <p><a href="index.html" class="back">← all clusters</a></p>
+    <h1>The checks</h1>
+    <p class="lede">{thresholds} threshold rules and {len(items) - thresholds} detectors. Every
+       number is either a documented MongoDB or WiredTiger limit or a value measured on a real
+       capture — the reasoning is under each one.</p>
+    {''.join(sections)}"""
+    return layout("The checks · mongo-health", body, "", now)
 
 
 def page_index(rows: list[dict], now: datetime) -> str:
@@ -1586,7 +1641,9 @@ def page_index(rows: list[dict], now: datetime) -> str:
        Incidents counted over the last {WINDOW_DAYS} days.</p>
     <div class="card">{''.join(items)}</div>
     <p class="needs-server" style="margin:1.2rem 0 0"><a href="add">
-      <button class="secondary">Add a cluster</button></a></p>"""
+      <button class="secondary">Add a cluster</button></a></p>
+    <p class="aside"><a href="rules.html">The checks</a> — what each one looks at, and why at
+       that threshold.</p>"""
     return layout("mongo-health", body, "", now)
 
 
@@ -1718,6 +1775,7 @@ def build(clusters: list[dict], data: Path, out: Path, now: datetime | None = No
     _NOW = now
     rows = [build_cluster(spec, data, out, now) for spec in clusters]
     write(out / "index.html", page_index(rows, now))
+    write(out / "rules.html", page_rules(now))
     return rows
 
 

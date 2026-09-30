@@ -1,0 +1,585 @@
+# The checks
+
+Every check mongo-health runs, what it looks at, when it speaks and why at that threshold. Generated from the code by `collector/catalog.py`; the threshold rules come from `big-hole/src/insights/rules.ts`, reasoning included.
+
+32 threshold rules and 9 detectors.
+
+## Concurrency and queues
+
+### Read ticket pool saturated — `read-tickets-saturated`
+
+**Severity:** critical · **Speaks when:** ≥ 50% for 60 s, dips of up to 15 s tolerated
+
+**Metric:** `pct(serverStatus.wiredTiger.concurrentTransactions.read.out, serverStatus.wiredTiger.concurrentTransactions.read.totalTickets)`
+
+Most of the read ticket pool was checked out, so reads were queueing for a slot.
+
+**Why this threshold.** MongoDB 8.0 sizes the execution pools adaptively: when it sees pressure it *grows* the pool, so the pathology no longer looks like a pool pinned at zero for half a minute. It looks like a pool that is almost entirely checked out, with `available` flickering through zero for a second at a time.
+
+Measured on a saturated M10 (2 vCPU, 8.0.29) under a deliberate collection-scan storm: `available` hit zero on 132 samples but the longest unbroken run was 3 seconds, so a rule requiring 30 s of continuous exhaustion saw nothing. Over the same window the mean ratio of checked-out tickets to pool size sat at 46-77%, against under 20% at rest -- which separates load from idle cleanly, and is what these rules test instead.
+
+Written against the 7.x paths so the alias table maps them forward to `queues.execution.*` on 8.0; both releases resolve. The ratio dips whenever the adaptive sizer grows the pool; those dips are part of the episode, not the end of it.
+
+**What to check.** Read latency and the global lock read queue over the same window, then what was consuming the tickets — a collection scan, a missing index, or storage that stopped keeping up.
+
+### Write ticket pool saturated — `write-tickets-saturated`
+
+**Severity:** critical · **Speaks when:** ≥ 50% for 60 s, dips of up to 15 s tolerated
+
+**Metric:** `pct(serverStatus.wiredTiger.concurrentTransactions.write.out, serverStatus.wiredTiger.concurrentTransactions.write.totalTickets)`
+
+Most of the write ticket pool was checked out, so writes were queueing for a slot.
+
+**Why this threshold.** MongoDB 8.0 sizes the execution pools adaptively: when it sees pressure it *grows* the pool, so the pathology no longer looks like a pool pinned at zero for half a minute. It looks like a pool that is almost entirely checked out, with `available` flickering through zero for a second at a time.
+
+Measured on a saturated M10 (2 vCPU, 8.0.29) under a deliberate collection-scan storm: `available` hit zero on 132 samples but the longest unbroken run was 3 seconds, so a rule requiring 30 s of continuous exhaustion saw nothing. Over the same window the mean ratio of checked-out tickets to pool size sat at 46-77%, against under 20% at rest -- which separates load from idle cleanly, and is what these rules test instead.
+
+Written against the 7.x paths so the alias table maps them forward to `queues.execution.*` on 8.0; both releases resolve. The ratio dips whenever the adaptive sizer grows the pool; those dips are part of the episode, not the end of it.
+
+**What to check.** Write latency, the global lock write queue, and cache dirty over the same window — a full pool is usually downstream of eviction falling behind.
+
+### Read tickets exhausted — `read-tickets-exhausted`
+
+**Severity:** critical · **Speaks when:** ≤ 0 for 30 s without a break
+
+**Metric:** `serverStatus.wiredTiger.concurrentTransactions.read.available`
+
+No read ticket was available, so every incoming read waited for one.
+
+**Why this threshold.** The single most useful signal in a saturation investigation. Available tickets at zero means every further operation queues, and the server is no longer keeping up with what is being asked of it -- everything else (latency, queue depth, connection count) is downstream of this. The 8.0 rename to `queues.execution` is handled by the alias table. Brief exhaustion is normal under load; a pool that stays empty is not. No tolerance, unlike the cache rules. MongoDB 8.0 sizes this pool adaptively -- it shrinks to single digits on an idle server -- so `available` touches zero routinely, and on a healthy 8.0 node it did so on 91 scattered samples with a pool of 6. Bridging those into an episode reported a critical saturation on a server that was fine. The pathology this rule exists for is a pool pinned at zero, which needs no bridging to be seen.
+
+**What to check.** Read latency and the global lock read queue over the same window, then what was consuming the tickets — a collection scan, a missing index, or storage that stopped keeping up.
+
+### Write tickets exhausted — `write-tickets-exhausted`
+
+**Severity:** critical · **Speaks when:** ≤ 0 for 30 s without a break
+
+**Metric:** `serverStatus.wiredTiger.concurrentTransactions.write.available`
+
+No write ticket was available, so every incoming write waited for one.
+
+**Why this threshold.** The single most useful signal in a saturation investigation. Available tickets at zero means every further operation queues, and the server is no longer keeping up with what is being asked of it -- everything else (latency, queue depth, connection count) is downstream of this. The 8.0 rename to `queues.execution` is handled by the alias table. Brief exhaustion is normal under load; a pool that stays empty is not. No tolerance, unlike the cache rules. MongoDB 8.0 sizes this pool adaptively -- it shrinks to single digits on an idle server -- so `available` touches zero routinely, and on a healthy 8.0 node it did so on 91 scattered samples with a pool of 6. Bridging those into an episode reported a critical saturation on a server that was fine. The pathology this rule exists for is a pool pinned at zero, which needs no bridging to be seen.
+
+**What to check.** Dirty cache and checkpoint activity over the same window — write tickets usually empty because eviction is behind, not because the writes themselves are slow.
+
+### Read queue building — `read-queue-building`
+
+**Severity:** warning · **Speaks when:** ≥ 10 for 60 s, dips of up to 15 s tolerated
+
+**Metric:** `serverStatus.globalLock.currentQueue.readers`
+
+Reads were waiting on the global lock queue rather than executing.
+
+**Why this threshold.** The global lock queue is the symptom the user actually feels. It is downstream of the ticket pool, so it is `warning` rather than `critical`: worth surfacing, but the tickets above are the finding.
+
+**What to check.** Read tickets over the same window — a sustained read queue is almost always the ticket pool emptying.
+
+### Write queue building — `write-queue-building`
+
+**Severity:** warning · **Speaks when:** ≥ 10 for 60 s, dips of up to 15 s tolerated
+
+**Metric:** `serverStatus.globalLock.currentQueue.writers`
+
+Writes were waiting on the global lock queue rather than executing.
+
+**Why this threshold.** The global lock queue is the symptom the user actually feels. It is downstream of the ticket pool, so it is `warning` rather than `critical`: worth surfacing, but the tickets above are the finding.
+
+**What to check.** Write tickets and dirty cache over the same window.
+
+## Cache and memory
+
+### Cache dirty above the eviction trigger — `cache-dirty-high`
+
+**Severity:** warning · **Speaks when:** ≥ 20% for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `pct(serverStatus.wiredTiger.cache.tracked dirty bytes in the cache, serverStatus.wiredTiger.cache.maximum bytes configured)`
+
+Dirty cache stayed at or above the 20% mark where WiredTiger makes application threads evict.
+
+**Why this threshold.** WiredTiger targets 5% dirty and starts evicting application threads at 20%. Past that trigger the server is making user operations do eviction work, which is felt as latency with no corresponding change in workload. Eviction pulls dirty back under the trigger within seconds and it climbs straight back; measured at 30 s of unbroken breach on a capture spending 6+ minutes over the line.
+
+**What to check.** Checkpoint duration and disk write throughput — this is eviction failing to keep up with the write rate, and the storage is the usual reason.
+
+### Cache pinned at capacity — `cache-full`
+
+**Severity:** warning · **Speaks when:** ≥ 95% for 5 min, dips of up to 30 s tolerated
+
+**Metric:** `pct(serverStatus.wiredTiger.cache.bytes currently in the cache, serverStatus.wiredTiger.cache.maximum bytes configured)`
+
+The cache stayed within 5% of its configured maximum, leaving eviction no headroom.
+
+**Why this threshold.** The cache is meant to sit near full; that is what it is for. What matters is being pinned at the ceiling, because it means eviction has no headroom left.
+
+**What to check.** Pages evicted and bytes read into cache — a working set larger than the cache shows up here first, and as page faults next.
+
+### Sustained page faults — `page-faults-sustained`
+
+**Severity:** warning · **Speaks when:** ≥ 100/s for 5 min, dips of up to 30 s tolerated
+
+**Metric:** `rate(serverStatus.extra_info.page_faults)`
+
+The server was faulting pages from disk continuously, so its working set did not fit in memory.
+
+**Why this threshold.** Page faults on a database server mean the working set is not resident. A handful is routine; a sustained rate is the machine paging its way through the workload.
+
+**What to check.** Resident memory against the cache size, and whether another process on the host is taking the memory.
+
+### Host running out of memory — `memory-low`
+
+**Severity:** critical · **Speaks when:** ≤ 20% for 2 min, dips of up to 30 s tolerated
+
+**Metric:** `pct(systemMetrics.memory.MemAvailable_kb, systemMetrics.memory.MemTotal_kb)`
+
+Available memory on the host is low enough that allocations are at risk.
+
+**Why this threshold.** `MemAvailable` is the kernel's own estimate of what a new allocation could obtain *including* reclaimable page cache, so it is already the right question to ask of a database host -- unlike `MemFree`, which looks alarming on every healthy server.
+
+Calibrated against two captures of the same tier (M10, ~1.85 GB):
+
+<=20% <=25% <=30% samples / longest run idle cluster 0/0 0/0 0/0 never approaches any cut incident, node-00 138/36s 404/51s 4780/2152s incident, node-01 184/60s 1734/530s 4367/1841s incident, node-02 87/27s 942/284s 3245/2828s
+
+30% is where a merely busy cluster lives -- the incident capture sat at a median of 30-34% throughout -- so a rule there would fire on load rather than on trouble. 20% is clear of the idle cluster by a factor of two and still catches all three incident nodes.
+
+10% was tempting as "obviously bad" and is the wrong choice: the longest unbroken run below it was 11 seconds. By the time a host stays under 10% for a minute the OOM killer has usually already acted, and a rule that only fires after the fact reports history.
+
+**What to check.** Look at the WiredTiger cache size against the instance tier, and at whether another process shares the host. Sustained pressure here ends in the OOM killer stopping mongod, which reads as an unexplained restart.
+
+### Queries are being made to evict cache pages themselves — `eviction-by-app-threads`
+
+**Severity:** warning · **Speaks when:** ≥ 0.1% for 30 s, dips of up to 2 min tolerated
+
+**Metric:** `scale(rate(serverStatus.wiredTiger.thread-yield.application thread time evicting (usecs)), 0.0001)`
+
+WiredTiger could not free cache space fast enough, so the threads serving queries had to stop and evict pages themselves.
+
+**Why this threshold.** A cache at 95% is not a problem by itself; a cache that makes the application's own threads stop and evict pages IS one, because that wait is paid by the query the user is waiting for. This is the difference between "the cache is full" — which is what a cache is for — and "the cache is not keeping up".
+
+The cleanest separation of anything measured here: across 55,000 samples at rest on all three members this metric was *exactly zero*. During the incident the loaded member spent 30 s above zero and peaked at 1,199% — twelve threads' worth of time, spent evicting instead of answering. Warning, not critical, and the measurement is why. The peak is alarming -- 1,199%, twelve threads' worth of time spent evicting instead of answering -- but it totalled 41 seconds across a 24-minute incident. What was critical in that window was the ticket pool, held saturated for 1,325 seconds; this is one of the reasons for it, reported as a lead rather than as the emergency. Named with the OLDEST path, as every rule here is: `thread-yield` from 4.0 through 7.0, and the alias table maps it forward to `cache` on 8.0. Written the other way round it resolved to nothing on a real 7.0 cluster and never fired. 0.1% of one thread — one millisecond per second. A cut that low is only defensible because the floor is not "low" but exactly zero: across 55,000 samples on three members at rest this metric never left it. Anything measurable here is already outside normal.
+
+The cut was 1% first, which gave 30 seconds of evidence against a 30-second sustain — true, but with no margin at all. At 0.1% the same episode gives 43 seconds, and both secondaries replicating the same load stay at 5 s and 4 s, well clear. Two minutes, measured rather than guessed. Those 43 seconds arrived as 28 separate stretches of one to four seconds spread over nine minutes; at 60 s the gaps still closed the episode often enough that no group reached the 30 s sustain. Widening it does not widen the claim -- `sustainMs` counts only time actually in breach, never the bridged span. And there is no risk of joining two unrelated incidents, because at rest this metric is not low, it is exactly zero: there is nothing to bridge.
+
+**What to check.** This is cache pressure arriving as latency. Look at what filled the cache in this window — usually a scan reading data nobody needed — before concluding the cache is too small for the workload.
+
+### WiredTiger eviction in aggressive mode — `eviction-aggressive`
+
+**Severity:** warning · **Speaks when:** ≥ 1 for 30 s without a break
+
+**Metric:** `serverStatus.wiredTiger.cache.eviction currently operating in aggressive mode`
+
+The storage engine switched itself into aggressive eviction, which it does when normal eviction is not keeping up.
+
+**Why this threshold.** The engine's own declaration that it is struggling, so there is nothing to calibrate except how long to require.
+
+**This one has not been seen to fire.** Zero on every member at rest, and 16 seconds on the loaded member during the incident — short of the 30 s below. It is kept because it measures something the neighbouring rule does not: `eviction-by-app-threads` measures what the application PAID, this measures what the engine DECIDED, and a server can enter aggressive mode while no query is waiting on it. The first capture that sustains it for half a minute should be used to confirm the cut.
+
+**What to check.** Read alongside cache usage and dirty cache over the same window. On its own this says the engine noticed; the other two say how bad it got.
+
+### Old document versions are filling the cache — `history-store-pinned`
+
+**Severity:** warning · **Speaks when:** ≥ 20% for 2 min, dips of up to 60 s tolerated
+
+**Metric:** `pct(serverStatus.wiredTiger.cache.bytes belonging to the history store table in the cache, serverStatus.wiredTiger.cache.maximum bytes configured)`
+
+A growing share of the cache was holding old versions of documents rather than current data, which happens when something keeps an old snapshot alive.
+
+**Why this threshold.** Cache pressure and pinned content look almost identical and have opposite remedies, which is why this is a rule of its own rather than a note on `cache-full`.
+
+cache pressure the working set does not fit. More RAM fixes it. pinned content an old snapshot -- a forgotten query, a transaction left open -- stops old versions being freed. More RAM fixes NOTHING; the query has to go.
+
+What separates them is the history store. Under ordinary pressure it does not grow: the cache is simply full of current data. When something holds a snapshot open, WiredTiger has to keep every version written since, and they accumulate there.
+
+Expressed against the cache size rather than in bytes, because what matters is how much of the cache is being spent on versions nobody asked for. Measured on a soak run: at rest the history store held a median of 1% of the cache with a p95 of 9%; inside the injected incident the median was 8% and it reached 47%. Twenty is above anything the run produced without something holding a snapshot.
+
+**What to check.** Look for a long-running query, an open transaction, or a cursor nobody closed — the oldest one is usually the culprit. Adding memory does not help here: the versions are kept because a reader still needs them, and they will be freed the moment it finishes.
+
+## Storage
+
+### WiredTiger checkpoints running long — `checkpoint-slow`
+
+**Severity:** warning · **Speaks when:** ≥ 1,000 ms for 2 min, dips of up to 60 s tolerated
+
+**Metric:** `serverStatus.wiredTiger.transaction.transaction checkpoint most recent time (msecs)`
+
+Checkpoints are taking over a second, which stalls writes waiting behind them.
+
+**Why this threshold.** Everything below was calibrated with tools/calibrar.ts against captures where the verdict was already known, rather than estimated. Where a threshold could not be measured, its comment says so. The metric holds the last checkpoint's duration until the next one, so elapsed time over it is meaningless -- see `echoesAnEvent`. Reported as "620 of 865 checkpoints" instead. Written against the 7.x path so the alias table maps it forward: 8.0 moved this to `wiredTiger.checkpoint.most recent time (msecs)`, and before the alias existed this metric resolved to nothing at all on any modern cluster. A checkpoint that takes seconds stalls writes behind it, and it is one of the few explanations for the "everything froze for a moment" that users report and no throughput panel accounts for.
+
+Measured across the three nodes of the demo capture, samples at or above each cut:
+
+>=500ms >=1s >=5s >=10s node-00 0 0 0 0 (healthy throughout) node-02 121 0 0 0 (brief saturation) node-01 1046 828 627 164 (the node that actually suffered)
+
+1 s is where the healthy node and the sick one stop overlapping: node-00 never reaches it and node-01 sits above it for 8.9% of the capture. 500 ms would also catch node-02's brief episode, but that one is already reported by the ticket rules, and a second finding for the same incident is noise. `most recent time` holds its value until the next checkpoint, so a 60 s sustain would fire on a single slow checkpoint. Two minutes means at least two consecutive slow ones. The tolerance spans the gap between checkpoints, which would otherwise end the episode every time a fast one lands in the middle of a bad stretch.
+
+**What to check.** Look at cache dirty bytes and disk write throughput in the same window: a checkpoint gets slow either because there is too much dirty data to flush or because the volume cannot absorb it.
+
+### Storage slow to answer reads — `disk-read-latency-high`
+
+**Severity:** warning · **Speaks when:** ≥ 10 ms for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `div(rate(systemMetrics.disks.*.read_time_ms), rate(systemMetrics.disks.*.reads))`
+
+Each read from disk took ten milliseconds or more, sustained — an order of magnitude above what this class of storage answers in.
+
+**Why this threshold.** Latency per operation, not utilisation. `io_time_ms` — iostat's %util — does NOT mean saturation on a device that services requests in parallel, and the capture proves it rather than merely warning about it: at rest these members spent 45 s above 80% util, against 8 s during the incident. Utilisation was HIGHER when nothing was wrong.
+
+Time per operation does not have that problem. It is also the one number here that means the same thing on every cluster, which is why the threshold is a hardware fact rather than a percentile of this capture: Atlas presents EBS volumes as `nvme*`, and EBS answers in well under a millisecond until it runs out of the IOPS the tier is paying for.
+
+Verified not to fire falsely: across 55,000 samples at rest the longest stretch above 10 ms was a few seconds, nowhere near the sustain below.
+
+**What to check.** On Atlas this is usually the tier IOPS limit rather than a sick disk: check whether the volume is being throttled. Then check what is reading from disk at all, because a working set that fits in cache should not be.
+
+### Storage slow to accept writes — `disk-write-latency-high`
+
+**Severity:** warning · **Speaks when:** ≥ 10 ms for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `div(rate(systemMetrics.disks.*.write_time_ms), rate(systemMetrics.disks.*.writes))`
+
+Each write to disk took ten milliseconds or more, sustained.
+
+**Why this threshold.** Latency per operation, not utilisation. `io_time_ms` — iostat's %util — does NOT mean saturation on a device that services requests in parallel, and the capture proves it rather than merely warning about it: at rest these members spent 45 s above 80% util, against 8 s during the incident. Utilisation was HIGHER when nothing was wrong.
+
+Time per operation does not have that problem. It is also the one number here that means the same thing on every cluster, which is why the threshold is a hardware fact rather than a percentile of this capture: Atlas presents EBS volumes as `nvme*`, and EBS answers in well under a millisecond until it runs out of the IOPS the tier is paying for.
+
+Verified not to fire falsely: across 55,000 samples at rest the longest stretch above 10 ms was a few seconds, nowhere near the sustain below.
+
+**What to check.** Checkpoints and the journal both wait on this, so a slow volume shows up as long checkpoints and stalled writes before anyone thinks to look at storage.
+
+## Replication
+
+### Flow control throttling writes — `flow-control-engaged`
+
+**Severity:** warning · **Speaks when:** ≥ 10% for 60 s, dips of up to 15 s tolerated
+
+**Metric:** `scale(rate(serverStatus.flowControl.isLaggedTimeMicros), 0.0001)`
+
+The primary was throttling its own writes because a secondary was behind the majority-commit point.
+
+**Why this threshold.** Flow control throttles writes on the primary when secondaries fall behind the configured majority-commit window. Any sustained time in it means replication, not the primary, is setting the write rate. The metric is microseconds accumulated per second; scaling by 1e-4 turns that into a percentage of wall clock, matching the dashboard's own panel.
+
+**What to check.** Replication lag across the nodes, and whether the lagging secondary was itself ticket- or cache-bound.
+
+### Replication buffer backing up — `oplog-backlog`
+
+**Severity:** warning · **Speaks when:** ≥ 100,000,000 bytes for 60 s, dips of up to 15 s tolerated
+
+**Metric:** `serverStatus.metrics.repl.buffer.sizeBytes`
+
+A secondary is receiving oplog faster than it can apply it.
+
+**Why this threshold.** 8.0 splits the pipeline in two and the alias maps this to `buffer.write.sizeBytes`, which occupies the same position: the first place incoming oplog piles up. On 8.0 a backlog can additionally sit in `buffer.apply`, so this rule under-reports there rather than over-reports — the failure direction to prefer. The secondary is receiving oplog faster than it applies it. Measured on the demo capture: the two healthy nodes never put a single sample above 1 MB, while the node that fell behind during the incident spent 28 samples above 100 MB and peaked at 193 MB. There is no overlap at all between the two populations, so the exact cut inside that range hardly matters; 100 MB is a round number well clear of both ends.
+
+**What to check.** Check whether the secondary is ticket-starved or IO-bound. A backlog that keeps growing ends with the node falling off the oplog window and needing a full resync.
+
+### Replica set member not answering — `member-unhealthy`
+
+**Severity:** critical · **Speaks when:** ≤ 0 for 60 s without a break
+
+**Metric:** `replSetGetStatus.members.*.health`
+
+A member of the replica set stopped answering heartbeats.
+
+**Why this threshold.** Nothing to calibrate: `health` is the heartbeat verdict, 1 or 0, and 0 means this member has not answered. Never observed at 0 in our captures — three members, 55,000 samples, always 1 — so this rule has not been seen to fire. It is written anyway because the cost of missing it is a customer discovering after the fact that they had been running without a replica for a day.
+
+The wildcard expands to one finding per member, and the sustain keeps out the brief zeroes a member reports while restarting or during a network blip.
+
+**What to check.** Whether that member is down, unreachable, or merely slow. Losing one of three still serves writes; losing two stops them, so this is worth acting on before it compounds.
+
+### A member is falling behind the others — `replication-lag`
+
+**Severity:** critical · **Speaks when:** ≥ 30,000 ms for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `spread(replSetGetStatus.members.*.optimeDate)`
+
+One member of the set is applying oplog entries well behind the others, so it holds a copy of the data that is out of date.
+
+**Why this threshold.** Members compared against EACH OTHER, never against the clock.
+
+The obvious form -- `diff(localTime, members.*.lastAppliedWallTime)` -- is what Big Hole's own panel draws, and it is fine to look at and useless to alert on: those stamps only advance when there are writes, so an idle cluster drifts away from the clock together. Measured on the real capture: a median of 6,011 ms of "lag" at rest, and LESS during the incident, when there were writes. An alert on that fires hardest when nothing is happening.
+
+`spread()` has none of that. With no writes every member is equally stale and the spread is zero, which is the truth -- median 0 ms at rest on the same capture. 30 s, and the floor underneath it is not arbitrary: an idle replica set writes a periodic no-op every 10 seconds, so between two of them the members legitimately sit up to 10 s apart. Measured at rest on a healthy set: 8,508 s spent above 10 s, and not one sample above 30 s. Anything under about fifteen would fire on every quiet cluster. NOT been seen to fire: three members in one region, and nothing in the capture ever came close. Written because a secondary that stops applying is invisible until the day it is needed, and because the shape of it is now measurable without the artefact above.
+
+**What to check.** Which member, and whether it is short of CPU, memory or disk — a secondary that cannot keep up is usually starved rather than broken. Until it catches up it cannot be relied on for reads, and it does not count towards a majority write.
+
+### Oplog growing far faster than the workload explains — `oplog-churn`
+
+**Severity:** warning · **Speaks when:** ≥ 4,000 bytes for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `div(rate(serverStatus.wiredTiger.log.log bytes written), sum(rate(serverStatus.opcounters.update), rate(serverStatus.opcounters.insert), rate(serverStatus.opcounters.delete)))`
+
+Each write was putting far more into the oplog than a write of its kind should, so the oplog is being consumed much faster than the operation count suggests.
+
+**Why this threshold.** A RATIO, not a level. High oplog bytes with high traffic is a busy cluster; high oplog bytes with ordinary traffic means each operation is writing far more than it should -- an unindexed multi-update, a document rewritten whole on every change. Bytes of journal per write operation. At rest the median was 517 and the p95 1,790; inside the injected churn the median was 5,484. Four thousand sits between them with room on both sides.
+
+**What to check.** The real cost is the recovery window: an oplog that fills in an hour instead of a day means a secondary that falls behind for an hour needs a full resync. Look for updates that rewrite whole documents, or multi-updates touching more than intended.
+
+## Queries and workload
+
+### Queries scanning far more than they return — `query-targeting-poor`
+
+**Severity:** warning · **Speaks when:** ≥ 100 for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `div(rate(serverStatus.metrics.queryExecutor.scannedObjects), rate(serverStatus.metrics.document.returned))`
+
+The server read far more documents than it returned, which is what a query with no usable index looks like from the outside.
+
+**Why this threshold.** Measured on the same M10 during a deliberate collection-scan storm, comparing the 24 minutes of the incident against the 15 hours either side of it:
+
+at rest (55k samples) during the incident ratio p50 1.25, max 2.00 p95 483, 169 s above 100 collscans p95 0, 2 s above 10/s p95 48/s, 169 s above 10/s
+
+Both secondaries stayed at rest throughout on the ratio (max 17 and 8), which is what makes the separation trustworthy: it is not "the cluster was busy", it is "this member was reading badly". 100 documents read per document returned. At rest this cluster never exceeded 2, so the cut sits fifty times above observed normal and still caught 169 seconds of the incident. It is also the figure the wider MongoDB world recognises for query targeting, which matters for a finding whose whole value is that the reader acts on it.
+
+**What to check.** Turn on the profiler for the slow operations in this window, or check the shape of the heaviest queries against the indexes that exist. This is usually one missing index, and it is usually also the reason the cache, the tickets and the disk look busy.
+
+### Full collection scans running steadily — `collection-scans-sustained`
+
+**Severity:** warning · **Speaks when:** ≥ 10/s for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `rate(serverStatus.metrics.queryExecutor.collectionScans.total)`
+
+Whole collections were being read end to end, repeatedly.
+
+**Why this threshold.** 10/s, not 5. At rest this cluster spent 1,118 seconds above 5/s across its three members — internal collections scan constantly and a cut there would fire everywhere, forever. Above 10/s it spent 2 seconds in fifteen hours, against 169 seconds during the incident.
+
+**What to check.** Which collection, and whether the query behind it could use an index. A burst confined to one time of day is usually a batch job rather than a capacity problem, and the two have completely different fixes.
+
+### Writes are colliding on the same documents — `write-conflicts`
+
+**Severity:** warning · **Speaks when:** ≥ 10/s for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `rate(serverStatus.metrics.operation.writeConflicts)`
+
+Write operations were repeatedly colliding on the same documents, so the server made them wait and retry.
+
+**Why this threshold.** The strongest signal in an eight-hour soak run with a known timeline, and one that leaves no trace on CPU, disk or memory: a dashboard of resources looks perfectly healthy while this is happening, which is exactly why it gets reported as "the database is slow".
+
+Two writers updating the same document make one of them lose and retry. The work happens, the latency doubles, and nothing is saturated. It is a data-modelling problem -- a counter everybody increments, a queue everybody claims from -- not a capacity one, so no amount of hardware fixes it.
+
+Measured on the run: at rest this metric is 0 at both the median and the p95; inside the injected window the median was 48.9/s and it peaked at 139/s. Ten a second. The floor is not "low" but zero, so this is already far outside normal -- and well clear of the handful a busy cluster produces incidentally.
+
+**What to check.** Which documents: a hot counter, a queue everybody polls, a lock row. The fix is in the data model — spread the writes across more documents — and not in the hardware. Look at write latency over the same window to see what it cost.
+
+### Cursors are piling up — `cursors-leaking`
+
+**Severity:** warning · **Speaks when:** ≥ 500 for 2 min, dips of up to 60 s tolerated
+
+**Metric:** `serverStatus.metrics.cursor.open.total`
+
+The number of open cursors stayed high, which is what a client that opens cursors and never closes them looks like from the server.
+
+**Why this threshold.** These leave nothing on CPU, disk or memory. That is what makes them worth having: a resource dashboard looks healthy while they happen, so they arrive as "the database is slow" with nothing to point at. Calibrated against an eight-hour soak run with a known timeline of injected incidents, comparing each window against the time outside EVERY window rather than against the rest of the run. At rest this cluster sat at a median of 6 open cursors and a p95 of 154. Inside the injected leak the median was 1,145 and it reached 2,569. Five hundred is far above anything normal here and still low enough to catch a leak before it exhausts anything. Longer than most: a batch job legitimately opens many cursors for a while. What distinguishes a leak is that they do not close.
+
+**What to check.** Usually a driver used without exhausting or closing its cursors, or a connection pool that reconnects and abandons them. Each one holds a snapshot, so they also stop old versions of documents from being freed.
+
+### TTL deletions running hot — `ttl-storm`
+
+**Severity:** warning · **Speaks when:** ≥ 4,000/s for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `rate(serverStatus.metrics.ttl.deletedDocuments)`
+
+The TTL monitor was deleting documents far faster than usual, which competes with the application for the same write capacity.
+
+**Why this threshold.** The TTL monitor deletes constantly on a cluster that uses it -- at rest here the median was 0 with a p95 of 1,400/s. Inside the storm the median was 4,935/s. Four thousand separates the two without firing on ordinary expiry.
+
+**What to check.** Whether a bulk load just landed with expiry dates in the past, or a TTL index was created over existing data. The deletions are real writes: they fill the oplog and the cache like any other.
+
+### Sorts are spilling to disk — `sorts-spilling-to-disk`
+
+**Severity:** warning · **Speaks when:** ≥ 1/s for 30 s, dips of up to 30 s tolerated
+
+**Metric:** `rate(serverStatus.metrics.query.sort.spillToDisk)`
+
+Sort operations ran out of the memory they are allowed and had to write to disk to finish, which is far slower and competes with everything else for the same storage.
+
+**Why this threshold.** One a second. The threshold is semantic rather than statistical: MongoDB allows a sort 100 MB of memory, and a sort that exceeds it writes to disk. A single one is an occasional heavy query; a steady stream means queries are routinely ordering more than fits, which is an index that does not exist.
+
+Confirmed against a capture with a known timeline: outside every load window this metric spent 8 seconds above 1/s in seven and a half hours -- median and p95 both zero. Inside the window the median was 1,032/s, peaking at 5,975/s while writing 227 MB a second. Half a minute, which is short for this file. It can be, because the floor is zero: what is being asked is not "is this high" but "is this happening at all, consistently".
+
+**What to check.** A sort spills when there is no index that already provides the order asked for, so the server has to read everything and sort it. Find the queries with a sort stage in the profiler and check whether an index covering the sort would let them stream instead.
+
+### A burst of sorts spilled to disk at once — `sorts-spilling-burst`
+
+**Severity:** warning · **Speaks when:** ≥ 100/s for 5 s without a break
+
+**Metric:** `rate(serverStatus.metrics.query.sort.spillToDisk)`
+
+A large number of sort operations exceeded the memory they are allowed at the same moment and all wrote to disk at once, competing with each other and with everything else for the same storage.
+
+**Why this threshold.** Same severity as the sustained rule above rather than higher. A burst this violent tends to take something else down with it -- in the capture below the node stopped reporting FTDC entirely -- but that consequence has its own critical rule, and raising this one would report the same episode as critical twice. A hundred a second: a hundred sorts, each of which exceeded the 100 MB a sort is allowed, finishing in the same second. That is not the "occasional heavy query" the sustained rule above deliberately tolerates, whatever it does for the next thirty seconds.
+
+The pair exists because the sustained rule asks "is this happening consistently" and answers no to something that matters. Measured against a capture with a known timeline, an injected sort spill peaked at 4,701/s and was over in 8 seconds -- three times the peak of an index build that did trip the sustained rule, and invisible to it. Five seconds, and the margin is not close. Across three healthy stretches of that same run -- 7,983 samples per node, two hours of real load between the injected windows -- this metric was flat zero on all three members: not "low", zero, with no run above 1/s lasting a single second. The floor being zero is what lets the window be this short. No bridging, like the exhausted-ticket rules: what is being claimed is a real contiguous burst, and stitching scattered spikes into one would invent it.
+
+**What to check.** Look for what ran at that exact moment rather than for a standing problem: a report, a migration, or a scheduled job that sorts a whole collection. The fix is the same as for a steady spill — an index providing the order asked for — but the query to find is the one that ran once, so the profiler window has to cover those seconds.
+
+**Over a connection string (a sample every ten seconds):** needs 5 s in breach, which is 1 sample(s) at ten seconds: short bursts are seen coarsely or not at all.
+
+## Connections and network
+
+### Connection pool near its limit — `connections-high`
+
+**Severity:** warning · **Speaks when:** ≥ 85% for 5 min, dips of up to 60 s tolerated
+
+**Metric:** `pct(serverStatus.connections.current, sum(serverStatus.connections.current, serverStatus.connections.available))`
+
+The server is using most of the connections it is allowed to accept.
+
+**Why this threshold.** `connections.available` is what is LEFT, not the size of the pool, so the total is `current + available`. Dividing by `available` alone reads 100% at half full -- which is exactly what happened: a run whose real peak was 2,503 of ~5,000 connections reported 100.24% and fired a rule that says "using most of the connections it is allowed to accept". Half is not most, and a finding that says so is worse than no finding. 85 rather than 80, now that the number means what it says. Running out of connections takes an application down outright rather than slowing it, so the warning still wants room ahead of the wall. Still the least-measured threshold here: no capture has yet shown a pool genuinely close to full. A soak run reached 50% and nothing has gone past it, so 85 remains the conventional headroom figure rather than an observed one.
+
+**What to check.** Compare against driver pool settings across all clients. Reaching the limit refuses new connections rather than slowing existing ones, so the failure is abrupt.
+
+### Commands are taking milliseconds each — `command-latency-high`
+
+**Severity:** warning · **Speaks when:** ≥ 5,000 µs for 30 s, dips of up to 5 s tolerated; only while `div(rate(serverStatus.opLatencies.reads.latency), rate(serverStatus.opLatencies.reads.ops))` >= 5000 too
+
+**Metric:** `div(rate(serverStatus.opLatencies.commands.latency), rate(serverStatus.opLatencies.commands.ops))`
+
+Each command was taking milliseconds on average, which is where the time goes when the server is planning queries rather than running them.
+
+**Why this threshold.** The AVERAGE microseconds one command cost, which exists nowhere in FTDC: the two counters are cumulative totals, and the ratio of their rates is the only way to ask "how long is a command taking right now" rather than "how long has one taken since the server started".
+
+`commands` deliberately, not `reads` or `writes`. Those two have their own rules through the queues and the tickets; this bucket holds everything else -- aggregate, count, distinct, the admin traffic -- and it is the one that goes up when the server is spending its time PLANNING rather than executing. That is a failure with no other symptom: no resource is saturated, nothing is queued, the cache is fine, and the application is slow. ...and reads have to be slow too, or this is not the server's fault.
+
+The commands bucket counts awaitable and handshake traffic, so anything that slows the WIRE inflates it while the server is untouched. Measured on the same replica set, the same rule, two injected pathologies:
+
+plan cache churn (the server IS slow) us/command 10,576 us/read 72,855 netem on loopback (the network is slow) us/command 22,502 us/read 850
+
+Two orders of magnitude between them, on the metric this rule was not reading. Before this guard the rule fired through the whole netem window -- 14:26:24 to 14:32:21, peak 99ms per command -- under the title "Commands are taking milliseconds each", which sends somebody to look at a database that was working perfectly.
+
+5ms, the same line as the rule itself: the question is not whether reads are as bad as commands, it is whether the server is slow at all. Under real churn reads were fourteen times this; under netem they were a fifth of it. Five milliseconds per command. Measured on every node of two real Atlas clusters -- nine days, 2.45 million samples -- plus the injected pathology:
+
+healthy, all six Atlas nodes median 85-94us, p99 179-217us longest stretch above 5,000 73s, 24s, 16s, 8s, 5s, 3s (one figure per node) under injected plan-cache churn median 6,289us, 200 of 332 samples above
+
+The first calibration read ONE node per cluster, saw 3s and 5s, and concluded the line was never approached. It was: the worst node crossed it for 73 seconds. Checking a single member of a replica set is how a threshold gets set against the quietest thing in the room -- the members do different work, and the one under the read load is not the one to ask.
+
+The threshold survived the correction on its own merits. Across those nine days it produces exactly ONE finding, 32 seconds long on a cluster whose median command costs 91us -- a three-hundred-fold excursion, which is an event and not noise. What it does not survive is a lower line: at 2ms the same data would report several a day.
+
+That one finding was then read metric by metric, because an AVERAGE has an obvious way to lie: on a cluster running two commands a second, one slow command carries the mean and the rule would report an idle server as a sick one. It was not that. Through the window the node served a median of 86 commands a second -- 15 at the quietest -- each costing 5.3ms, while the cache sat at 4.7% dirty and NO OTHER RULE FIRED within two hours either side. Busy, slow, and nothing saturated: the exact shape this rule exists to name, and one nothing else in the set can see. Thirty seconds, the same floor every non-burst rule here uses. Fifteen was the first choice, on the argument that a planner storm is short -- but the measurement did not support needing it: at thirty the rule still catches the injected churn, because the pathology is dense rather than brief. Keeping the shorter window would have bought nothing and spent the margin that keeps the two Atlas clusters quiet. Small, and chosen against the false-positive data rather than the true-positive data: the isolated seconds on the two Atlas clusters were scattered minutes apart, and a generous tolerance is exactly what would stitch them into an incident that never occurred.
+
+**What to check.** Query shapes. A plan cache that never hits -- filters assembled dynamically by an ORM, or an API that accepts arbitrary filters -- makes every query pay the full multiplanner, which runs several candidate plans before choosing one. It shows up as CPU with no saturated resource behind it. Look at whether the same shapes repeat, not just whether the same collections do.
+
+**Over a connection string (a sample every ten seconds):** its 5 s tolerance is shorter than one sample, so a single dip ends the episode.
+
+### The server is answering fast; the time is going somewhere else — `slow-wire-not-server`
+
+**Severity:** warning · **Speaks when:** ≥ 5,000 µs for 2 min, dips of up to 15 s tolerated; only while `div(rate(serverStatus.opLatencies.reads.latency), rate(serverStatus.opLatencies.reads.ops))` <= 5000 too
+
+**Metric:** `div(rate(serverStatus.opLatencies.commands.latency), rate(serverStatus.opLatencies.commands.ops))`
+
+Commands were taking milliseconds each while the reads and writes the server actually ran stayed fast, and nothing inside the server was saturated. Time spent like that is not time the database is spending.
+
+**Why this threshold.** The mirror image of `command-latency-high`, on the same two metrics and with the opposite conjunction. Commands slow AND reads slow is a slow server. Commands slow AND reads FINE is not: the commands bucket counts awaitable and handshake traffic, so it absorbs the wait whenever something between the clients and the server is slow, while the work the server actually does stays exactly as fast as it was.
+
+Measured on a replica set with netem on loopback -- 120ms delay, 40ms jitter, 0.5% loss:
+
+us per command 200 -> 22,502 (and 13,515, 14,327, 10,958 through the window) us per read 840 -> 850 (unchanged) requests/s 2,000 -> 280 (the clients spend their time waiting) cache 87% -> 81%, read tickets free 5 -> 5, read queue 0, connections 90 -> 90
+
+Everything the server owns stayed still. That is the whole finding, and it is one no dashboard of database metrics will ever show, because every number on it is normal.
+
+This is deliberately NOT called "the network". FTDC cannot see a network: what it can say is that the server was not slow at the work it did, which is a fact, and that the time went somewhere it cannot see, which is also a fact. Naming the cause would be guessing, and this rule exists because guessing the cause is what sent people to the database in the first place. The same 5ms line as its sibling, and the same on both sides on purpose: the pair of rules partitions one situation rather than overlapping on it. Above the line for commands, below it for reads -- the server is not slow at its own work by exactly the definition the other rule uses to say that it is. Longer than its sibling's thirty seconds. A slow server is worth reporting quickly; this one is a claim about where the time is NOT going, and a brief handshake storm -- a deployment reconnecting every client at once -- produces the same shape for a few seconds without meaning anything.
+
+Sixty was tried and dropped: on the same capture it changed nothing at all. The second, shorter netem injection (2m46s, and only about a minute of it above the line) stays unreported at either figure, so the lower threshold bought no detection and would only have widened the door. Not shipping it is the measurement's answer, not caution.
+
+**What to check.** The path between the clients and this server, before the database. Latency or packet loss on the link, a proxy or load balancer in front of it, TLS renegotiating on every connection, DNS resolution on each connect. The giveaway is that the application sees slow queries and every server-side number looks healthy -- which is exactly what this is reporting. Compare a client-side timing against the same operation run from a shell on the server itself.
+
+### Clients are reconnecting in a storm — `connection-storm`
+
+**Severity:** warning · **Speaks when:** ≥ 10/s for 30 s, dips of up to 30 s tolerated
+
+**Metric:** `rate(serverStatus.connections.totalCreated)`
+
+New connections were being opened far faster than a healthy client does, which is what a reconnect loop or an exhausted client-side pool looks like.
+
+**Why this threshold.** The rate of NEW connections, which is a different failure from a pool that is merely large. A steady 2,000 connections is a well-behaved application with a big pool; 200 new ones a second is a client reconnecting in a loop, and each handshake costs the server real work before any query runs. At rest this cluster created 0 new connections a second at both the median and the p95. Across three injected storms the p95 ran 36-58/s with peaks to 252/s. Ten is well clear of the reconnect that follows an ordinary deploy. Short, because a storm is short and self-inflicted: the pool exhausts, clients back off, it starts again. Waiting a minute would miss the ones that matter.
+
+**What to check.** Driver pool settings and timeouts on the application side. A storm is usually a client giving up and retrying rather than the server refusing anything, and it costs the server handshake work that competes with real queries.
+
+## Events
+
+### Node stopped reporting — `ftdc-long-outage`
+
+**Severity:** critical · **Speaks when:** A hole in the sample clock of at least 60 s. Holes within 15 minutes of each other are one incident.
+
+The member stopped writing diagnostics for a minute or more: it was down, stalled, or the host froze.
+
+**What to check.** The mongod log for that window: a restart or an election explains it; if there is nothing, the host or its volume froze.
+
+### Repeated short stalls — `ftdc-micro-stalls`
+
+**Severity:** warning · **Speaks when:** At least 10 holes shorter than 60 s within one incident window.
+
+The member kept pausing for a few seconds at a time — too short to be an outage, too many to be noise.
+
+**What to check.** Host pauses: a VM being descheduled, swap, or storage that stops answering for seconds at a time.
+
+### The replica set elected a new primary — `election-held`
+
+**Severity:** warning · **Speaks when:** The replica set term went up. Elections within 30 s of each other are one event. Counted inside the report window, not over all history.
+
+Writes stop for the length of an election, so each one is a window in which the application could not write.
+
+**What to check.** One around a maintenance window is expected; several without one mean members are losing contact.
+
+### An alarm counter moved — `alarm`
+
+**Severity:** critical · **Speaks when:** Any increase of one of the counters listed below.
+
+Counters that should never move on a healthy server — each one is an event that went wrong.
+
+- A checkpoint failed — `serverStatus.wiredTiger.checkpoint.total failed number of checkpoints`
+- An index build hit corrupt data — `serverStatus.indexBuilds.failedDueToDataCorruption`
+- An index build ran out of disk — `serverStatus.indexBuilds.killedDueToInsufficientDiskSpace`
+- A salvage attempt failed — `serverStatus.wiredTiger.session.table salvage failed calls`
+- An initial sync attempt failed — `serverStatus.metrics.repl.initialSync.failedAttempts`
+- A read from storage failed — `serverStatus.wiredTiger.chunk-cache.number of times a read from storage failed`
+
+**What to check.** The mongod log at that moment, which will say what failed and why.
+
+### Something changed on the cluster — `setting-changed`
+
+**Severity:** info · **Speaks when:** A change in one of the settings listed below. Shown as context before incidents within 72 hours.
+
+A resize or a membership change — shown on the timeline next to what happened after it, so the two can be read together. It never claims a cause.
+
+- The host was resized — `systemMetrics.memory.MemTotal_kb`
+- The core count changed — `systemMetrics.cpu.num_logical_cores`
+- The cache was resized — `serverStatus.wiredTiger.cache.maximum bytes configured`
+- The oplog was resized — `local.oplog.rs.stats.storageStats.maxSize`
+- The replica set membership changed — `replSetGetStatus.votingMembersCount`
+
+**What to check.** Whether the behaviour after it is the change working, or the change's fault.
+
+### One member unlike the others — `peer-outlier`
+
+**Severity:** warning · **Speaks when:** One member at least 3× the median of the others on a metric listed below, above a floor that keeps near-zero values from producing ratios.
+
+Members of a replica set do the same work, so one far off the rest points at that host rather than at the workload.
+
+- One member checkpoints far slower than the others — `serverStatus.wiredTiger.transaction.transaction checkpoint most recent time (msecs)`
+- One member is holding far more dirty cache than the others — `serverStatus.wiredTiger.cache.tracked dirty bytes in the cache`
+
+**What to check.** That host: its disk, its neighbours on the hypervisor, its configuration.
+
+## Against the cluster's own history
+
+### Unusual for this cluster — `baseline-excursion`
+
+**Severity:** info · **Speaks when:** Above the highest value held in the baseline for that metric on that member. One finding per metric per day, so a new level is said once, not every hour.
+
+A metric went beyond anything this cluster did in its own history — not a fixed threshold, but its own past.
+
+**What to check.** Whether the workload changed. A new normal is absorbed into the baseline as runs accumulate.
+
+### Something will run out — `capacity-runway`
+
+**Severity:** warning · **Speaks when:** Only resources with a limit the cluster itself reports (cache, connections, tickets, memory). Growth has to be steady across the whole span, not a step, and the crossing has to be near enough to matter.
+
+At the rate it has been growing, a resource reaches its limit soon — the only finding that arrives before the incident.
+
+**What to check.** Whether the growth is real demand or something accumulating that should not.
+
+### Larger than its workload needs — `oversized-cluster`
+
+**Severity:** info · **Speaks when:** Every measured resource under 50% at its single busiest moment, on the busiest member; memory and CPU both measured; silent after any trouble in the window.
+
+Over at least a week, nothing went past half of what the cluster has — the one finding that saves money.
+
+**What to check.** That the period covers the busiest time of the month before resizing.
