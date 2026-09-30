@@ -4,6 +4,8 @@
 #   schedule            (default) run once now, then on the schedule in docker/crontab
 #   run                 one collection round: capture, analyse, report, notify, prune
 #   onboard ...         add Atlas clusters to the config and pull everything Atlas still holds
+#   serve               the report, with the forms to add clusters and mark incidents fixed
+#   poll                read clusters connected by connection string, every ten seconds
 #   report | watchdog | digest ...   one of those on its own
 #   anything else       executed as given, e.g. `bash`
 #
@@ -61,21 +63,33 @@ cmd="${1:-schedule}"
 
 case "$cmd" in
   schedule)
-    need_config
     # A first round straight away, so the report has something in it minutes after
     # `docker compose up` rather than at the next :05. The lock in run.sh keeps it from
-    # overlapping the scheduled one if it runs long.
-    ./run.sh $(send_flag) --prune &
+    # overlapping the scheduled one if it runs long. With no config yet the schedule still
+    # starts: the first cluster is usually added from the page, and the next round picks it up.
+    [ -f "$CONFIG" ] && ./run.sh $(send_flag) --prune &
     exec supercronic -passthrough-logs /app/docker/crontab
     ;;
   run)
-    need_config
+    if [ ! -f "$CONFIG" ]; then
+      echo "no clusters yet — add one at http://localhost:8080/add"
+      exit 0
+    fi
     exec ./run.sh $(send_flag) --prune "$@"
     ;;
   onboard)
     # onboard.py starts a new file when there is none; an empty one it would fail to parse.
     [ -s "$CONFIG" ] || rm -f "$CONFIG"
     exec python3 onboard.py --config "$CONFIG" --data "$DATA" --site "$SITE" "$@"
+    ;;
+  serve)
+    # Starts without a config: adding the first cluster from the page is what creates it.
+    exec python3 server.py --config "$CONFIG" --data "$DATA" --site "$SITE" --bind 0.0.0.0 \
+      --port 8080 "$@"
+    ;;
+  poll)
+    # Starts without a config too, and picks up clusters as they are added.
+    exec python3 poller.py --config "$CONFIG" --data "$DATA" "$@"
     ;;
   report)
     need_config

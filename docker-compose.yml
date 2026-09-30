@@ -1,9 +1,11 @@
 # The collector, and a web server for the report it builds.
 #
 #   cp .env.example .env                       # the Atlas key and SMTP password, if any
-#   docker compose run --rm collector onboard --group-id <atlas project id> --notify you@x.com
 #   docker compose up -d
-#   open http://localhost:8080
+#   open http://localhost:8080              # and "Add a cluster"
+#
+# Or from the command line:
+#   docker compose run --rm collector onboard --group-id <atlas project id> --notify you@x.com
 #
 # Everything the collector keeps is in the `data` volume: raw FTDC, the baseline, findings and
 # the outbox. The baseline is the part that cannot be rebuilt, because the FTDC it came from is
@@ -22,16 +24,39 @@ services:
       - data:/var/lib/bighole/data
       - site:/var/lib/bighole/site
 
-  report:
-    image: nginx:1.27-alpine
+  # Clusters connected by connection string: asks each member for its diagnostics every ten
+  # seconds, and writes them as FTDC for the collector to pick up.
+  poller:
+    image: mongo-health
+    command: poll
     restart: unless-stopped
-    # Bound to this machine only: the report describes your clusters. To reach it from
-    # elsewhere, put it behind something that asks who is looking.
-    ports:
-      - "127.0.0.1:8080:80"
+    env_file:
+      - path: .env
+        required: false
     volumes:
-      - site:/usr/share/nginx/html:ro
-      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./config:/etc/bighole
+      - data:/var/lib/bighole/data
+    depends_on:
+      - collector
+
+  ui:
+    image: mongo-health
+    command: serve
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    # Bound to this machine only: the report describes your clusters, and the forms add clusters
+    # and write API keys. To reach it from elsewhere, set UI_PASSWORD in .env and put it behind
+    # HTTPS.
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./config:/etc/bighole
+      - data:/var/lib/bighole/data
+      - site:/var/lib/bighole/site
+    depends_on:
+      - collector
 
 volumes:
   data:

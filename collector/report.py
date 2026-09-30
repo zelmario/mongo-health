@@ -32,6 +32,7 @@ import runway
 from group import group as group_findings, moments as by_moment, name_nodes
 from notify import changes_before
 from verdict import Verdict, evaluate
+import resolutions
 import sizing
 from profile import times_before
 from watchdog import STALE_AFTER_HOURS
@@ -846,6 +847,25 @@ h2 { font-size: 1.0625rem; margin: 2rem 0 0.8rem; }
 """
 
 INCIDENT_CSS = """
+/* The add page: the one command to create the monitoring user, and the folded file option. */
+pre.snippet { background: var(--ground); border: 1px solid var(--edge); padding: .7rem .9rem;
+              font-family: var(--mono); font-size: .8125rem; white-space: pre-wrap;
+              overflow-x: auto; color: var(--ink); }
+details.card-fold { margin-top: 1rem; }
+details.card-fold > summary { cursor: pointer; color: var(--ink-soft); font-size: .9375rem;
+                              margin-bottom: .6rem; }
+
+/* The cluster picker on the add page. */
+label.pick { display: flex; gap: .6rem; align-items: baseline; font-weight: 400;
+             padding: .5rem 0; border-bottom: 1px solid var(--edge-soft); }
+label.pick input { margin: 0; }
+
+/* Forms need the server that serves the site; opened from disk there is none. */
+.from-disk .needs-server { display: none; }
+form.inline { display: inline; margin: 0; }
+.fixed-note { margin: 1.5rem 0; border-left: 3px solid var(--ok); }
+.fixed-note p { margin: 0 0 .4rem; }
+
 /* Capacity: one row per resource, the bar is the share of it used at the busiest moment. */
 table.capacity th { text-align: left; }
 table.capacity td.num, table.capacity .num { font-family: var(--mono); white-space: nowrap; }
@@ -934,6 +954,11 @@ CAUSES = {
     "ssh": [
         "the host stopped answering, or the key the collector uses was removed",
     ],
+    "mongodb": [
+        "the collector cannot connect: the password changed, the user was dropped, or the "
+        "network path to the members is closed",
+        "the poller service is not running",
+    ],
 }
 DEFAULT_CAUSES = ["something between the cluster and the collector stopped"]
 
@@ -951,7 +976,10 @@ def layout(title: str, body: str, root: str, generated: datetime) -> str:
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)}</title><style>{CSS}{REPORT_CSS}{INCIDENT_CSS}</style></head>
-<body><div class="wrap">
+<body><script>
+  /* Opened from disk there is no server to receive a form, so the forms are not offered. */
+  if (location.protocol === "file:") document.documentElement.classList.add("from-disk");
+</script><div class="wrap">
 <header class="top"><a class="brand" href="{root}index.html">mongo-health</a>
   <span>as of {esc(stamp)}</span></header>
 {body}
@@ -1067,6 +1095,35 @@ def change_points(changes: list[dict]) -> list[tuple[int, str]]:
     return out
 
 
+def fix_form(g, action: str) -> str:
+    """"I fixed this", with room to say what was done. Posted to the server that serves the
+    site; hidden when the site is opened from disk, where there is nothing to post to."""
+    ids = ",".join(m["id"] for m in g.members)
+    return f"""
+          <details class="fixed needs-server">
+            <summary>I fixed this</summary>
+            <form method="post" action="{esc(action)}">
+              <input type="hidden" name="ids" value="{esc(ids)}">
+              <label for="note-{esc(g.worst['id'])}">What did you do? (optional)</label>
+              <input id="note-{esc(g.worst['id'])}" name="note" type="text" autocomplete="off"
+                     maxlength="{resolutions.NOTE_LIMIT}"
+                     placeholder="Added an index on orders.customer_id">
+              <button type="submit" class="secondary">Mark as fixed</button>
+            </form>
+            <p class="hint">It leaves the report and goes to the cluster's history, with your
+              note. If it happens again, it comes back and counts as a repeat.</p>
+          </details>"""
+
+
+def reopen_form(g, action: str) -> str:
+    ids = ",".join(m["id"] for m in g.members)
+    return f"""
+            <form method="post" action="{esc(action)}" class="needs-server inline">
+              <input type="hidden" name="ids" value="{esc(ids)}">
+              <button type="submit" class="secondary small">Put it back</button>
+            </form>"""
+
+
 def card(g, cluster_id: str, findings: list[dict], chart_file, muted: set[str]) -> str:
     """One incident on the cluster page: the worst-affected node's chart, and its history."""
     f = g.worst
@@ -1103,6 +1160,7 @@ def card(g, cluster_id: str, findings: list[dict], chart_file, muted: set[str]) 
             <p>{esc(f.get('check') or '')}</p>
           </details>
           {hushed}
+          {fix_form(g, "resolve")}
         </article>"""
 
 
@@ -1283,8 +1341,8 @@ def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, olde
             f'{esc(round(float(summary.get("megabytes") or 0)))} MB · '
             f'{tally} in the last {WINDOW_DAYS} days</p>')
 
-    older_link = (f'<p class="aside"><a href="history.html">{older} older '
-                  f'incident{"s" if older != 1 else ""}</a></p>' if older else "")
+    older_link = (f'<p class="aside"><a href="history.html">{older} older or marked as '
+                  f'fixed</a></p>' if older else "")
     profile = (f'<h2>How this cluster behaves</h2><div class="embedded">{profile_html}</div>'
                if profile_html else "")
     muted_note = ""
@@ -1309,9 +1367,28 @@ def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, olde
     return layout(f"{cluster_id} · mongo-health", body, "../", now)
 
 
-def page_history(cluster_id: str, older: list, now: datetime) -> str:
-    """Incidents past the report window. Out of the report, not out of the data: if the same
-    thing happens again it is still counted as a repeat."""
+def page_history(cluster_id: str, older: list, fixed: list, now: datetime) -> str:
+    """What has been dealt with, with what was said about it, and what is past the report window.
+    Out of the report, not out of the data: if the same thing happens again it is still counted
+    as a repeat."""
+    closed = []
+    for g, res in sorted(fixed, key=lambda x: x[1].get("at") or "", reverse=True):
+        f = g.worst
+        note = res.get("note")
+        when = (res.get("at") or "")[:10]
+        closed.append(f"""
+            <article class="closed" data-sev="{esc(g.severity)}">
+              <div class="head"><div>
+                <h3><a href="incidents/{esc(f['id'])}.html">{esc(g.headline())}</a></h3>
+                <div class="facts">
+                  <span>{esc(name_nodes(g.nodes))}</span>
+                  <span>{esc(when_ms(g.from_ms))}</span>
+                </div>
+              </div>{reopen_form(g, "reopen")}</div>
+              {f'<p class="note">“{esc(note)}”</p>' if note else
+               '<p class="note none">Marked as fixed without a note.</p>'}
+              <div class="when">Marked as fixed {esc(when)}</div>
+            </article>""")
     rows = []
     for m in sorted(by_moment(list(older)), key=lambda m: -m.from_ms):
         for g in m.groups:
@@ -1330,14 +1407,16 @@ def page_history(cluster_id: str, older: list, now: datetime) -> str:
             </article>""")
     body = f"""
     <p><a href="index.html" class="back">← {esc(cluster_id)}</a></p>
-    <h1>Older than {WINDOW_DAYS} days</h1>
+    <h1>History</h1>
     <p class="lede">Out of the report, not out of the data: if the same thing happens again it is
        still counted as a repeat.</p>
-    {"".join(rows)}"""
+    {f'<h2>Marked as fixed</h2>{"".join(closed)}' if closed else ''}
+    {f'<h2>Older than {WINDOW_DAYS} days</h2>{"".join(rows)}' if rows else ''}"""
     return layout(f"History · {cluster_id} · mongo-health", body, "../", now)
 
 
-def page_incident(cluster_id: str, g, findings: list[dict], chart_file, now: datetime) -> str:
+def page_incident(cluster_id: str, g, findings: list[dict], chart_file, now: datetime,
+                  resolution: dict | None = None) -> str:
     """One incident in full.
 
     Every member gets its own chart, which answers the question the summary cannot: was this
@@ -1419,6 +1498,19 @@ def page_incident(cluster_id: str, g, findings: list[dict], chart_file, now: dat
     lead.sort(key=lambda e: e[0])
     worst = g.worst
 
+    # The same action as on the cluster page, on the page somebody reads before deciding it is
+    # dealt with -- and, once it is, what they said about it.
+    if resolution:
+        note = resolution.get("note")
+        action = f"""
+        <div class="card fixed-note">
+          <p><b>Marked as fixed {esc((resolution.get("at") or "")[:10])}</b></p>
+          {f'<p class="note">“{esc(note)}”</p>' if note else ''}
+          {reopen_form(g, "../reopen")}
+        </div>"""
+    else:
+        action = fix_form(g, "../resolve") if g.rule != "setting-changed" else ""
+
     body = f"""
     <p><a href="../index.html" class="back">← {esc(cluster_id)}</a></p>
     <ol class="axis">
@@ -1443,6 +1535,7 @@ def page_incident(cluster_id: str, g, findings: list[dict], chart_file, now: dat
         </div>
       </li>
     </ol>
+    {action}
     {history}"""
     return layout(f"{g.title} · {cluster_id}", body, "../../", now)
 
@@ -1458,8 +1551,8 @@ def page_index(rows: list[dict], now: datetime) -> str:
     """Every cluster, and whether anybody is watching it."""
     if not rows:
         body = ('<h1>No clusters yet</h1><div class="quiet"><b>Nothing to show</b>'
-                '<p>Add a cluster to <code>config.json</code>, or run <code>onboard.py</code>, '
-                'and it appears here after the next run.</p></div>')
+                '<p><a class="needs-server" href="add">Add a cluster</a>, or add it to '
+                '<code>config.json</code>; it appears here after the next run.</p></div>')
         return layout("mongo-health", body, "", now)
 
     items = []
@@ -1491,7 +1584,9 @@ def page_index(rows: list[dict], now: datetime) -> str:
     <h1>Is my cluster healthy?</h1>
     <p class="lede">One answer per cluster, from every check over all the history held.
        Incidents counted over the last {WINDOW_DAYS} days.</p>
-    <div class="card">{''.join(items)}</div>"""
+    <div class="card">{''.join(items)}</div>
+    <p class="needs-server" style="margin:1.2rem 0 0"><a href="add">
+      <button class="secondary">Add a cluster</button></a></p>"""
     return layout("mongo-health", body, "", now)
 
 
@@ -1550,9 +1645,13 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
     # incident, and their chart is the before and after -- but on the cluster page they are
     # points on the axis, not incidents.
     groups = group_findings(findings)
+    done = resolutions.load(base)
     incidents = [g for g in groups if g.rule != "setting-changed"]
-    recent = [g for g in incidents if g.to_ms >= cutoff]
-    older = [g for g in incidents if g.to_ms < cutoff]
+    fixed = [(g, r) for g in incidents if (r := resolutions.is_resolved(g, done))]
+    open_ = [g for g in incidents if not resolutions.is_resolved(g, done)]
+    recent = [g for g in open_ if g.to_ms >= cutoff]
+    older = [g for g in open_ if g.to_ms < cutoff]
+    settled = {m["id"] for g, _ in fixed for m in g.members}
 
     charts = site / "charts"
     drawn: set[str] = set()
@@ -1564,22 +1663,26 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
         return name
 
     muted = set(spec.get("mute") or [])
-    verdict = evaluate(findings, now, silent_hours(state, now, summary),
+    # What somebody marked as fixed no longer decides the verdict. What happens next does.
+    verdict = evaluate([f for f in findings if f["id"] not in settled], now,
+                       silent_hours(state, now, summary),
                        bool(state.get("last_capture")),
                        float(summary.get("days_of_raw_ftdc") or 0))
     write(site / "index.html",
-          page_cluster(cluster_id, summary, state, recent, len(by_moment(list(older))),
+          page_cluster(cluster_id, summary, state, recent,
+                       len(by_moment(list(older))) + len(fixed),
                        findings, chart_file, profile_section(base, now), muted, now, verdict,
                        capacity(base, summary, findings, now)))
-    if older:
-        write(site / "history.html", page_history(cluster_id, older, now))
+    if older or fixed:
+        write(site / "history.html", page_history(cluster_id, older, fixed, now))
     elif (site / "history.html").exists():
         (site / "history.html").unlink()
 
     pages: set[str] = set()
     for g in groups:
         page = f"{g.worst['id']}.html"
-        write(site / "incidents" / page, page_incident(cluster_id, g, findings, chart_file, now))
+        write(site / "incidents" / page, page_incident(cluster_id, g, findings, chart_file, now,
+                                                        resolutions.is_resolved(g, done)))
         pages.add(page)
         for m in g.members:
             if f"{m['id']}.html" not in pages:

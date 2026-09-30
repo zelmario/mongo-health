@@ -67,8 +67,13 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
     ftdc = base / "ftdc"
     state = State.load(base / "state.json", cluster_id)
 
-    source = sources.build(spec["source"], pending_job=state.pending_job,
-                           job_estimate=state.last_job_seconds)
+    if spec["source"].get("type") == "mongodb":
+        # Connected by connection string: poller.py writes what the members report as FTDC
+        # under poll/, and from here on it is a directory like any other.
+        source = sources.DirectorySource(base / "poll")
+    else:
+        source = sources.build(spec["source"], pending_job=state.pending_job,
+                               job_estimate=state.last_job_seconds)
     # Recorded on every run rather than only at creation: a cluster can be moved from one kind
     # of source to another, and `watchdog.py` judges silence against a clock that depends on
     # this — a stale value there would judge it against the wrong one.

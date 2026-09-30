@@ -49,6 +49,10 @@ def build(tmp: Path, specs: list[dict]) -> Path:
     return out
 
 
+# Pages the server answers rather than files the report writes; hidden when opened from disk.
+SERVER_ROUTES = {"add"}
+
+
 def links_in(page: Path) -> list[str]:
     return re.findall(r'(?:href|src)="([^"#:]+)"', page.read_text())
 
@@ -68,6 +72,8 @@ def test_every_link_in_the_site_leads_somewhere(tmp_path):
     assert len(pages) > 3
     for page in pages:
         for link in links_in(page):
+            if link in SERVER_ROUTES:
+                continue
             assert (page.parent / link).resolve().exists(), f"{page.name} -> {link}"
 
 
@@ -284,3 +290,48 @@ def test_an_idle_cluster_is_called_larger_than_it_needs(tmp_path):
     baseline_rows(data, "n0", idle, days=30)
     page = (build(tmp_path, [spec]) / "prod" / "index.html").read_text()
     assert "Larger than it needs: in 30 days" in page
+
+
+# ---------------------------------------------------------------------- marked as fixed
+
+import resolutions  # noqa: E402
+
+
+def test_a_fixed_incident_leaves_the_report_and_the_verdict(tmp_path):
+    data = tmp_path / "data"
+    spec = cluster(data, [finding("a", node="n0", at=MS - 3 * HOUR),
+                          finding("b", node="n1", at=MS - 3 * HOUR)])
+    resolutions.resolve(data / "prod", ["a", "b"], "Added an index on orders.customer_id", NOW)
+    out = build(tmp_path, [spec])
+    page = (out / "prod" / "index.html").read_text()
+    assert "Healthy" in page, "what was dealt with no longer decides the verdict"
+    assert "Host running out of memory" not in page.split("<h2>What happened</h2>")[1]
+    history = (out / "prod" / "history.html").read_text()
+    assert "Added an index on orders.customer_id" in history
+    assert 'action="reopen"' in history
+    incident = (out / "prod" / "incidents" / "a.html").read_text()
+    assert "Marked as fixed" in incident and 'action="../reopen"' in incident
+
+
+def test_the_same_thing_happening_again_is_news_and_a_repeat(tmp_path):
+    data = tmp_path / "data"
+    spec = cluster(data, [finding("old", at=MS - 5 * DAY), finding("new", at=MS - 2 * HOUR)])
+    resolutions.resolve(data / "prod", ["old"], "", NOW)
+    page = (build(tmp_path, [spec]) / "prod" / "index.html").read_text()
+    assert "At risk" in page
+    assert "This has happened 2 times" in page, "the fixed one still counts as history"
+
+
+def test_putting_it_back_restores_it(tmp_path):
+    data = tmp_path / "data"
+    spec = cluster(data, [finding("a", at=MS - 3 * HOUR)])
+    resolutions.resolve(data / "prod", ["a"], "", NOW)
+    resolutions.reopen(data / "prod", ["a"])
+    assert "At risk" in (build(tmp_path, [spec]) / "prod" / "index.html").read_text()
+
+
+def test_forms_are_offered_and_hidden_from_disk(tmp_path):
+    spec = cluster(tmp_path / "data", [finding("a")])
+    page = (build(tmp_path, [spec]) / "prod" / "index.html").read_text()
+    assert 'action="resolve"' in page and 'name="ids" value="a"' in page
+    assert 'class="fixed needs-server"' in page and "from-disk" in page

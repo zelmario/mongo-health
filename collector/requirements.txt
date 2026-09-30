@@ -1,3 +1,4 @@
 # The collector's only third-party dependencies. Everything else is the standard library.
 matplotlib==3.9.0
 requests==2.32.3
+pymongo==4.7.2
