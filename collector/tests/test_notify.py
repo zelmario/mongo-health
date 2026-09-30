@@ -19,7 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from notify import build_message, draw_chart, mark_notified, read_pending  # noqa: E402
+from notify import (build_message, draw_chart, mark_notified, notify_cluster,  # noqa: E402
+                    read_pending)
 
 T0 = 1_754_000_000_000
 HOUR = 3_600_000
@@ -226,18 +227,47 @@ def test_no_chart_without_points(tmp_path: Path):
 
 # --------------------------------------------------------------- the way back to the report
 
-def a_message(tmp_path: Path, findings=None):
+def a_message(tmp_path: Path, findings=None, site=None):
     return build_message("prod", findings or [a_finding()], ["ops@example.com"],
-                         "bighole@localhost", tmp_path, days=9.4)
+                         "bighole@localhost", tmp_path, days=9.4, site=site)
 
 
-def test_a_collector_with_no_web_app_sends_no_links(tmp_path: Path, monkeypatch):
-    """Self-hosted, no web: a dead link in an email about a broken cluster is a small betrayal."""
-    monkeypatch.delenv("BIGHOLE_PUBLIC_URL", raising=False)
+SITE = "https://reports.example.com/prod"
+
+
+def test_without_a_report_url_the_mail_carries_no_links(tmp_path: Path):
+    """A report read only from disk has no address: a dead link in an email about a broken
+    cluster is a small betrayal."""
     msg = a_message(tmp_path)
-
     assert "href=" not in html_of(msg)
-    assert "Open prod in Big Hole" not in text_of(msg)
+    assert "in the report:" not in text_of(msg)
+
+
+def test_each_incident_links_to_its_page_in_the_report(tmp_path: Path):
+    msg = a_message(tmp_path, site=SITE)
+    page = f"{SITE}/incidents/f1.html"
+    assert f'href="{page}"' in html_of(msg)
+    assert page in text_of(msg), "in full in the text half, for people who copy links by hand"
+    assert f"{SITE}/index.html" in html_of(msg)
+
+
+def test_the_incidents_that_were_only_named_are_linked_too(tmp_path: Path):
+    findings = [a_finding(fid=f"f{i}", rule=f"r{i}", at=T0 + i * 5 * HOUR) for i in range(8)]
+    html = html_of(a_message(tmp_path, findings, site=SITE))
+    for i in range(8):
+        assert f"{SITE}/incidents/f{i}.html" in html
+
+
+def test_the_report_url_reaches_the_email_from_the_config(tmp_path: Path):
+    """End to end through notify_cluster: the address comes from the config's report_url."""
+    base = tmp_path / "data" / "prod"
+    base.mkdir(parents=True)
+    (base / "findings.jsonl").write_text(json.dumps(a_finding()) + "\n")
+    spec = {"cluster_id": "prod", "notify": ["a@x"], "report_url": "https://r.example.com"}
+    notify_cluster(spec, tmp_path / "data", tmp_path / "outbox", False, None, None,
+                   verbose=False)
+    (eml,) = (tmp_path / "outbox" / "prod").glob("*.eml")
+    assert "https://r.example.com/prod/incidents/f1.html" in eml.read_text()
 
 
 # ------------------------------------------------------- context does not send mail alone

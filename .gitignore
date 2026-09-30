@@ -3,7 +3,7 @@ collector/config.json
 collector/data/
 collector/outbox/
 collector/logs/
-collector/status.html
+collector/site/
 collector/profile-*.html
 collector/.run.lock
 __pycache__/

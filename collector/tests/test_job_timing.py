@@ -1,50 +1,22 @@
-"""The progress a running capture reports, and what the numbers are allowed to claim.
+"""How long Atlas takes to build a bundle, measured and kept for the next run.
 
-The point of these is not that a bar moves. It is that every number it shows came from
-something counted -- bytes against a Content-Length, files against a listing -- and that the
-one phase which cannot be counted says so instead of inventing a percentage.
+The only honest ground for an estimate of the wait is how long this same cluster took last time;
+a job an earlier run ordered measures us, not the build, and must not be timed.
 """
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import progress  # noqa: E402
 import sources  # noqa: E402
 from capture import capture_cluster  # noqa: E402
 from sources import AtlasSource  # noqa: E402
 from state import State  # noqa: E402
-from tests.test_capture import FakeResponse, _EmptyTar, make_source_dir  # noqa: E402
-
-
-def test_the_phases_move_forward_and_never_go_backwards():
-    """A bar that goes back has said something false in one of the two directions."""
-    seen = [p.start for p in progress.PHASES]
-    assert seen == sorted(seen)
-    assert progress.PHASES[-1].end == 100
-
-
-def test_a_fraction_of_a_known_total_is_where_the_number_comes_from(tmp_path):
-    progress.report(tmp_path, "download", done=183_000_000, total=366_000_000)
-    state = progress.read(tmp_path)
-
-    download = progress.BY_KEY["download"]
-    assert state["percent"] == round(download.start + (download.end - download.start) * 0.5)
-    assert state["certain"] is True
-
-
-def test_a_phase_with_nothing_to_count_stays_at_its_start(tmp_path):
-    """Atlas reports a status, never a percentage. Nothing to count means nothing to claim."""
-    progress.report(tmp_path, "build", note="42", certain=False)
-    state = progress.read(tmp_path)
-
-    assert state["percent"] == progress.BY_KEY["build"].start
-    assert state["certain"] is False
+from tests.test_capture import FakeResponse, _EmptyTar  # noqa: E402
 
 
 def test_the_wait_for_atlas_is_reported_against_the_last_measured_one(monkeypatch):
@@ -85,18 +57,6 @@ def test_a_resumed_job_is_not_timed(monkeypatch):
                         lambda url, **kw: FakeResponse({"id": "job9"}))
     list(fresh.fetch(None))
     assert fresh.job_seconds is not None, "a job we ordered is the one worth timing"
-
-
-def test_a_capture_reports_what_it_is_storing(tmp_path):
-    """Works for any source, not only Atlas: the count is of files, which they all yield."""
-    root = make_source_dir(tmp_path, {"n1": [("metrics.2026-08-07T01-15-12Z-00000", 1024)]})
-    spec = {"cluster_id": "c0",
-            "source": {"type": "directory", "path": str(root)}}
-    capture_cluster(spec, tmp_path / "data", verbose=False)
-
-    state = progress.read(tmp_path / "data" / "c0")
-    assert state["phase"] == "store"
-    assert state["done"] == 1
 
 
 def test_the_measured_job_time_is_kept_for_the_next_run(monkeypatch, tmp_path):

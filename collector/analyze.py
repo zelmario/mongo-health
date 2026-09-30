@@ -16,7 +16,7 @@ Writes three things per cluster, each with a different use:
                      the FIRST capture: once Atlas drops the raw data, this is all that is
                      left to later say "that is unusual for this cluster". It cannot be
                      reconstructed after the fact.
-    summary.json     the current state, which is what the status page shows
+    summary.json     the current state, which is what the report shows
 
 The engine lives in `runner/analyze.ts` and runs inside Big Hole, so that decoder, aliases
 and rules all live in one place.
@@ -35,7 +35,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import anomaly
-import progress
 import runway
 import sizing
 from capture import record_usage
@@ -217,9 +216,6 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
         print(f"[{cluster_id}] {len(pending)} new file(s)")
 
     t0 = time.monotonic()
-    # One step, not a fraction of one: the engine is a single call that either produces
-    # findings or does not, and splitting it into a number would mean inventing one.
-    progress.report(base, "analyse", note=f"{len(pending)} file(s)", certain=False)
     # Not just the new files: an episode can start in an old file and end in a new one, and
     # looking at them separately would either split it in two findings or lose it entirely.
     # The engine reads from a day before the last run, and takes everything older from the
@@ -330,14 +326,13 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
 
     # Chart shapes for the profile report, in their own file and overwritten each run. They
     # are neither history (the baseline is) nor small enough to belong in summary.json, which
-    # gets read on every status page build.
+    # gets read on every report build.
     shapes = {n["node"]: n.get("series", {}) for n in nodes if n.get("series")}
     if shapes:
         (base / "series.json").write_text(json.dumps(shapes))
 
     state.mark_analyzed([f.key for f in pending])
     state.save(base / "state.json")
-    progress.report(base, "done")
 
     measured = {
         "cluster_id": cluster_id,

@@ -31,7 +31,7 @@ Two different numbers, and conflating them would misrepresent the service:
   - **raw FTDC available** — how far back a capture can actually be opened in Big Hole and
     read second by second. This is what the retention window buys, and it does shrink.
 
-`status.py` shows both for this reason.
+The report shows both for this reason.
 """
 from __future__ import annotations
 

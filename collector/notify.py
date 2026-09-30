@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from urllib.parse import quote
 import smtplib
 import sys
 from datetime import datetime, timezone
@@ -52,6 +53,8 @@ TEXT = {
     "intro_one": "One thing worth looking at on {cluster}.",
     "intro_many": "{n} things worth looking at on {cluster}.",
     "and_more": "{n} more, in the report.",
+    "open": "See the whole incident",
+    "open_all": "Open {cluster} in the report",
     "window": "Worst window",
     "duration": "Time in state",
     "node": "Node",
@@ -64,7 +67,7 @@ TEXT = {
 
 ATLAS_DAYS = 3
 
-# Same palette as the status page, so an email and the page look like one product.
+# Same palette as the report, so an email and the page look like one product.
 INK = "#171b20"
 INK_SOFT = "#5b666f"
 EDGE = "#d3d8dd"
@@ -208,8 +211,20 @@ def duration(seconds: int) -> str:
     return f"{seconds / 3600:.1f} h"
 
 
+def incident_url(site: str | None, finding_id: str) -> str | None:
+    """Where the report page for this finding lives, when the site is served somewhere.
+
+    `report_url` is unset on an install that only reads its report from disk, and then the
+    email carries no links rather than links that go nowhere: a dead link in an email about a
+    broken cluster is its own small betrayal. Any member of an incident has a page -- the site
+    leaves a redirect for each -- so the id of whichever finding the email grouped on is enough.
+    """
+    return f"{site}/incidents/{quote(str(finding_id), safe='')}.html" if site else None
+
+
 def render_html(cluster_id: str, incidents: list, cids: dict[str, str],
-                days: float | None, context: dict | None = None) -> str:
+                days: float | None, context: dict | None = None,
+                site: str | None = None) -> str:
 
     blocks = []
     for m in incidents[:DETAILED_IN_MAIL]:
@@ -233,6 +248,12 @@ def render_html(cluster_id: str, incidents: list, cids: dict[str, str],
         f = g.worst
         colour = SEVERITY_COLOR.get(f["severity"], INK)
         cid = cids.get(f["id"])
+        # Every node's chart and every earlier time are on the report page. The email is the
+        # alert; it is not trying to be the report.
+        url = incident_url(site, f["id"])
+        more = (f'<p style="margin:14px 0 0;font:600 14px/1.5 -apple-system,system-ui,'
+                f'sans-serif;"><a href="{esc(url)}" style="color:{SIGNAL};">'
+                f'{TEXT["open"]} →</a></p>' if url else "")
         chart_html = (
             f'<img src="cid:{cid}" alt="{esc(f["metric"])}" '
             f'style="width:100%;max-width:640px;height:auto;display:block;margin:14px 0;">'
@@ -264,6 +285,7 @@ def render_html(cluster_id: str, incidents: list, cids: dict[str, str],
           <p style="margin:0;font:13px/1.6 -apple-system,system-ui,sans-serif;color:{INK_SOFT};">
             <b style="color:{INK};">{TEXT["check"]}:</b> {esc(f["check"])}</p>
           {changed}
+          {more}
         </td></tr>""")
 
     # Everything past the detailed few gets one line, so the reader knows what is waiting
@@ -272,7 +294,9 @@ def render_html(cluster_id: str, incidents: list, cids: dict[str, str],
     if rest:
         items = "".join(
             f'<li style="margin:0 0 4px;">'
-            + esc(m.headline())
+            + (f'<a href="{esc(incident_url(site, m.groups[0].worst["id"]))}" '
+               f'style="color:{INK};">{esc(m.headline())}</a>' if site
+               else esc(m.headline()))
             + f' <span style="color:{INK_SOFT};">· {when_ms(m.from_ms)}</span></li>'
             for m in rest)
         blocks.append(f"""
@@ -288,6 +312,16 @@ def render_html(cluster_id: str, incidents: list, cids: dict[str, str],
     intro = (TEXT["intro_one"] if len(incidents) == 1 else TEXT["intro_many"]).format(
         n=len(incidents), cluster=esc(cluster_id))
 
+    # After the findings rather than before them: whoever opened this wants to know what
+    # happened first. Bordered instead of filled because many mail clients drop backgrounds.
+    open_all = ""
+    if site:
+        open_all = (
+            f'<p style="margin:22px 0 0;"><a href="{esc(site)}/index.html" '
+            f'style="display:inline-block;padding:9px 16px;border:1px solid {SIGNAL};'
+            f'color:{SIGNAL};text-decoration:none;'
+            f'font:600 14px/1 -apple-system,system-ui,sans-serif;">'
+            f'{esc(TEXT["open_all"].format(cluster=cluster_id))}</a></p>')
     history = ""
     if days:
         banked = f'<b style="color:{SIGNAL}">{days:.0f}</b>'
@@ -314,6 +348,7 @@ def render_html(cluster_id: str, incidents: list, cids: dict[str, str],
     {"".join(blocks)}
   </table></td></tr>
   <tr><td style="padding:0 28px 26px;">
+    {open_all}
     {history}
     <p style="margin:22px 0 0;padding-top:16px;border-top:1px solid {EDGE};
               font:12px/1.5 -apple-system,system-ui,sans-serif;color:#8b959d;">
@@ -349,7 +384,8 @@ def changes_before(all_findings: list[dict], before_ms: int) -> list[dict]:
     return sorted(seen.values(), key=lambda f: -int(f["worstFromMs"]))
 
 
-def render_text(cluster_id: str, incidents: list, context: dict | None = None) -> str:
+def render_text(cluster_id: str, incidents: list, context: dict | None = None,
+                site: str | None = None) -> str:
     """The plain-text half. Not a courtesy: some people read mail in a terminal."""
     lines = [f"{cluster_id} — {len(incidents)} incident(s)", ""]
     for m in incidents[:DETAILED_IN_MAIL]:
@@ -365,19 +401,26 @@ def render_text(cluster_id: str, incidents: list, context: dict | None = None) -
         ]
         for c in (context or {}).get(m.from_ms, []):
             lines.append(f"  Changed before this: {c['title']} — {when_ms(c['worstFromMs'])}")
+        # The URL in full, on its own line: a terminal mail client will not hide it behind
+        # words, and this half of the message is read by people who copy links by hand.
+        if site:
+            lines.append(f"  {incident_url(site, f['id'])}")
         lines.append("")
     rest = incidents[DETAILED_IN_MAIL:]
     if rest:
         lines.append(TEXT["and_more"].format(n=len(rest)))
         lines += [f"  {when_ms(m.from_ms)}  {m.headline()}" for m in rest]
         lines.append("")
+    if site:
+        lines += [TEXT["open_all"].format(cluster=cluster_id) + f": {site}/index.html", ""]
     lines.append(TEXT["footer"])
     return "\n".join(lines)
 
 
 def build_message(cluster_id: str, findings: list[dict], recipients: list[str],
                   sender: str, work: Path, days: float | None,
-                  all_findings: list[dict] | None = None) -> EmailMessage:
+                  all_findings: list[dict] | None = None,
+                  site: str | None = None) -> EmailMessage:
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = ", ".join(recipients)
@@ -400,8 +443,9 @@ def build_message(cluster_id: str, findings: list[dict], recipients: list[str],
 
     context = {m.from_ms: changes_before(all_findings or findings, m.from_ms)
                for m in incidents}
-    msg.set_content(render_text(cluster_id, incidents, context))
-    msg.add_alternative(render_html(cluster_id, incidents, cids, days, context), subtype="html")
+    msg.set_content(render_text(cluster_id, incidents, context, site))
+    msg.add_alternative(render_html(cluster_id, incidents, cids, days, context, site),
+                        subtype="html")
 
     html_part = msg.get_payload()[1]
     for cid, png in charts:
@@ -481,7 +525,8 @@ def notify_cluster(spec: dict, root: Path, outbox: Path, send: bool,
     # incident was written days ago and stopped being pending the moment it was read past.
     everything = [json.loads(line)
                   for line in (base / "findings.jsonl").read_text().splitlines() if line]
-    msg = build_message(cluster_id, pending, recipients, sender, work, days, everything)
+    site = f"{spec['report_url']}/{quote(cluster_id, safe='')}" if spec.get("report_url") else None
+    msg = build_message(cluster_id, pending, recipients, sender, work, days, everything, site)
 
     if not send:
         # Stamped rather than a fixed `message.eml`: an outbox that silently overwrites

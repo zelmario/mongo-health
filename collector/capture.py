@@ -20,7 +20,6 @@ import sys
 import time
 from pathlib import Path
 
-import progress
 import sources
 from config import ConfigError, load_clusters
 from state import State, now
@@ -69,8 +68,7 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
     state = State.load(base / "state.json", cluster_id)
 
     source = sources.build(spec["source"], pending_job=state.pending_job,
-                           job_estimate=state.last_job_seconds,
-                           on_progress=lambda phase, **kw: progress.report(base, phase, **kw))
+                           job_estimate=state.last_job_seconds)
     # Recorded on every run rather than only at creation: a cluster can be moved from one kind
     # of source to another, and `watchdog.py` judges silence against a clock that depends on
     # this — a stale value there would judge it against the wrong one.
@@ -109,9 +107,6 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
             if verbose:
                 mark = "~" if f.is_interim else "+"
                 print(f"  {mark} {f.node}/{f.name}  {size/1024:.0f} KB")
-            progress.report(base, "store", done=new + skipped,
-                            total=getattr(source, "expected", None),
-                            note=f"{(new_bytes)/1024/1024:.0f} MB")
     finally:
         # Written even when the run fails, and this is the point of it: a bundle we ordered and
         # could not wait out is exactly the thing a failed run has to leave behind. Losing the

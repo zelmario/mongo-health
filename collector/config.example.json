@@ -1,6 +1,7 @@
 {
   "notify": ["you@example.com"],
   "retention_days": 365,
+  "report_url": "https://mongo-reports.example.com",
   "smtp": {
     "host": "smtp.example.com",
     "port": 587,

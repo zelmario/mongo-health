@@ -5,18 +5,18 @@
     python3 watchdog.py --config config.json --data data --send   # email the alert
 
 A monitoring service that dies quietly is worse than no monitoring service. Whoever
-believes their cluster is watched, the status page keeps showing the last good run, and the
+believes their cluster is watched, the report keeps showing the last good run, and the
 silence reads as "nothing is wrong" instead of "nobody is looking". That is the failure this
 guards against, and it is the one failure the collector cannot report about itself.
 
 ## Why this is a separate program
 
-`status.py` already shows a stale cluster — but `status.py` is run **by the collector**. If the
-cron stops firing, the page is never regenerated, so it freezes displaying the last healthy
+The report already shows a stale cluster — but the report is built **by the collector**. If the
+cron stops firing, the site is never rebuilt, so it freezes displaying the last healthy
 state. A dead collector produces a page that actively asserts everything is fine.
 
-So this reads only two things: the state files on disk, and the clock. It imports nothing from
-the analysis path and needs neither Node nor Big Hole. It can run from a
+So this reads only the state files on disk, the clock, and the mail settings. It imports
+nothing from the analysis path and needs neither Node nor Big Hole. It can run from a
 different cron entry, a different user, or a different machine pointed at the same storage —
 and the further away it runs, the more failures it can see.
 
@@ -45,7 +45,7 @@ import config
 # The cron runs hourly. One missed run is routine — a slow Atlas job, a long first capture, a
 # run that took the lock and held it — so the threshold is four of them: past any reboot or
 # maintenance window, and still a quarter of the blind spot the six-hourly cron needed.
-# Same threshold the status page uses, so the two never disagree.
+# Same threshold the report uses, so the two never disagree.
 STALE_AFTER_HOURS = 4
 
 
@@ -168,7 +168,7 @@ def compose(problems: list[dict], recipients: list[str], sender: str,
         "",
         "This is about the collector, not about the clusters themselves: they may be",
         "perfectly healthy. What it means is that nobody is currently watching them,",
-        "and that the status page is showing the last run rather than the present.",
+        "and that the report is showing the last run rather than the present.",
         "",
     ]
     for p in problems:

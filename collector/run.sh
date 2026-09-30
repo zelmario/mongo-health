@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One cron entry: capture, analyse, rebuild the status page, notify.
+# One cron entry: capture, analyse, rebuild the report, notify.
 #
 #   ./run.sh                    # nothing irreversible: no email sent, nothing deleted
 #   ./run.sh --send             # also deliver the email
@@ -13,7 +13,7 @@
 # Nothing here is clever on purpose. It runs four commands in order, refuses to run twice at
 # once, records what happened, and exits non-zero if any step failed so that cron's own
 # mail-on-failure does its job. A collector that dies quietly is worse than one that never
-# ran, because the status page would keep showing yesterday's clean bill of health.
+# ran, because the report would keep showing yesterday's clean bill of health.
 
 # No `-e`: a failing step must not abort the rest. If Atlas is unreachable, capture fails but
 # analysing what is already on disk, refreshing the page and sending pending findings are all
@@ -25,7 +25,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")" || exit 2
 CONFIG="${CONFIG:-config.json}"
 DATA="${DATA:-data}"
 OUTBOX="${OUTBOX:-outbox}"
-STATUS_OUT="${STATUS_OUT:-status.html}"
+SITE="${SITE:-site}"
 LOG_DIR="${LOG_DIR:-logs}"
 LOCK="${LOCK:-.run.lock}"
 
@@ -113,7 +113,7 @@ say "=== run starting${SEND:+ (delivery enabled)}${PRUNE:+ (pruning enabled)} ==
 
 step capture python3 capture.py --config "$CONFIG" --data "$DATA" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
 step analyze python3 analyze.py --config "$CONFIG" --data "$DATA" "${PASSTHROUGH[@]+"${PASSTHROUGH[@]}"}"
-step status  python3 status.py  --data "$DATA" --out "$STATUS_OUT"
+step report python3 report.py --config "$CONFIG" --data "$DATA" --out "$SITE"
 
 # Notify runs last and only reads what analyse committed, so it is safe even when an earlier
 # step failed: without new findings it has nothing pending and says so.

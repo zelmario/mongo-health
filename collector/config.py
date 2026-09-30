@@ -3,6 +3,7 @@
     {
       "notify": ["you@example.com"],
       "retention_days": 365,
+      "report_url": "https://mongo-reports.example.com",
       "smtp": {"host": "smtp.example.com", "port": 587, "from": "collector@example.com",
                "user": "collector@example.com"},
       "clusters": [
@@ -92,6 +93,8 @@ def clusters(cfg: dict) -> list[dict]:
             "mute": cluster.get("mute", []),
             "retention_days": int(cluster.get("retention_days",
                                               cfg.get("retention_days", DEFAULT_RETENTION_DAYS))),
+            # Where `site/` is served, if anywhere. The emails link into it when it is set.
+            "report_url": (cfg.get("report_url") or "").rstrip("/") or None,
         })
     return out
 
