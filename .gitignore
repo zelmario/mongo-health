@@ -8,3 +8,6 @@ collector/profile-*.html
 collector/.run.lock
 __pycache__/
 .pytest_cache/
+
+# Copied from collector/runner/analyze.ts on every run; edit that one.
+big-hole/tools/analyze.ts
