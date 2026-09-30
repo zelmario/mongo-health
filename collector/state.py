@@ -1,8 +1,7 @@
 """What has been downloaded, analysed and notified.
 
-Today this lives in one JSON file per cluster. It is shaped like a table -- flat rows, with
-an identifier and timestamps -- because the day there are real customers this becomes a
-database, and the migration should not involve reinterpreting nested structures.
+One JSON file per cluster, shaped like a table -- flat rows, with an identifier and
+timestamps -- so that nothing has to reinterpret nested structures to read it.
 
 It is needed from day one for a practical reason rather than a design one: without it the
 same email goes out twice whenever two runs overlap.
@@ -69,7 +68,6 @@ class SeenFile:
 
 @dataclass
 class State:
-    customer_id: str
     cluster_id: str
     files: dict[str, SeenFile] = field(default_factory=dict)
     last_capture: str | None = None
@@ -96,12 +94,11 @@ class State:
     # ------------------------------------------------------------------ persistence
 
     @classmethod
-    def load(cls, path: Path, customer_id: str, cluster_id: str) -> "State":
+    def load(cls, path: Path, cluster_id: str) -> "State":
         if not path.exists():
-            return cls(customer_id=customer_id, cluster_id=cluster_id)
+            return cls(cluster_id=cluster_id)
         raw = json.loads(path.read_text())
         return cls(
-            customer_id=raw.get("customer_id", customer_id),
             cluster_id=raw.get("cluster_id", cluster_id),
             files={k: SeenFile(**v) for k, v in raw.get("files", {}).items()},
             last_capture=raw.get("last_capture"),
@@ -122,7 +119,6 @@ class State:
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         body = {
-            "customer_id": self.customer_id,
             "cluster_id": self.cluster_id,
             "last_capture": self.last_capture,
             "last_new_data": self.last_new_data,

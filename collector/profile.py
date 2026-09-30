@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The report a new cluster gets on day one, whether or not anything is wrong.
 
-    python3 profile.py --data data --customer acme --cluster orders-prod --out profile.html
+    python3 profile.py --data data --cluster orders-prod --out profile.html
 
 A list of findings is a bad first impression, because most clusters are fine. Sign up a healthy
 one, run the rules, and the honest output is "nothing fired" — which reads as "this does
@@ -690,7 +690,7 @@ def render(summary: dict, findings: list[dict], baseline: list[dict],
   <header class="head">
     <div class="eyebrow">{TEXT["title"]}</div>
     <h1>{esc(summary.get("cluster_id",""))}</h1>
-    <p class="sub">MongoDB {esc(version)} · {len(nodes)} nodes · {esc(summary.get("customer_id",""))}</p>
+    <p class="sub">MongoDB {esc(version)} · {len(nodes)} nodes</p>
   </header>
 
   <div class="rescued">
@@ -723,12 +723,11 @@ def render(summary: dict, findings: list[dict], baseline: list[dict],
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data", type=Path, default=Path("data"))
-    ap.add_argument("--customer", required=True)
     ap.add_argument("--cluster", required=True)
     ap.add_argument("--out", type=Path, default=Path("profile.html"))
     args = ap.parse_args()
 
-    base = args.data / args.customer / args.cluster
+    base = args.data / args.cluster
     if not (base / "summary.json").exists():
         print(f"no analysis yet under {base} — run analyze.py first", file=sys.stderr)
         return 2

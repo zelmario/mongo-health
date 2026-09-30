@@ -4,7 +4,7 @@
 #   ./run.sh                    # nothing irreversible: no email sent, nothing deleted
 #   ./run.sh --send             # also deliver the email
 #   ./run.sh --send --prune     # also delete raw FTDC past its retention
-#   ./run.sh --customer acme --send
+#   ./run.sh --cluster orders-prod --send
 #
 # Install as:
 #

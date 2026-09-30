@@ -39,7 +39,7 @@ matplotlib.use("Agg")  # no display in a cron job
 import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 
-from capture import load_clusters  # noqa: E402
+import config  # noqa: E402
 from group import group as group_findings, moments, name_nodes, subject_for  # noqa: E402
 from state import now  # noqa: E402
 
@@ -416,12 +416,12 @@ def build_message(cluster_id: str, findings: list[dict], recipients: list[str],
 
 def notify_cluster(spec: dict, root: Path, outbox: Path, send: bool,
                    override_to: str | None, smtp: dict | None, verbose: bool = True) -> int:
-    customer_id, cluster_id = spec["customer_id"], spec["cluster_id"]
-    base = root / customer_id / cluster_id
+    cluster_id = spec["cluster_id"]
+    base = root / cluster_id
 
     pending = read_pending(base)
 
-    # Rules this customer switched off for this cluster. Filtered here, at the last step before
+    # Rules switched off for this cluster. Filtered here, at the last step before
     # an email is composed, so that muting changes exactly one thing: whether we write. The
     # findings were still detected, still stored, and still appear in the report marked as
     # muted -- a monitoring product that hides what it found is lying to the person paying it
@@ -435,7 +435,7 @@ def notify_cluster(spec: dict, root: Path, outbox: Path, send: bool,
     if silenced:
         pending = [f for f in pending if f.get("rule") not in muted]
         if verbose:
-            print(f"[{customer_id}/{cluster_id}] {len(silenced)} finding(s) muted "
+            print(f"[{cluster_id}] {len(silenced)} finding(s) muted "
                   f"({', '.join(sorted({f['rule'] for f in silenced}))})")
         # Marked here rather than on the way out, because what happens to them does not depend
         # on the rest. Doing it at the end missed the path where everything left over is
@@ -455,17 +455,17 @@ def notify_cluster(spec: dict, root: Path, outbox: Path, send: bool,
     # carries whatever context accumulated before it.
     if pending and all(f.get("severity") == "info" for f in pending):
         if verbose:
-            print(f"[{customer_id}/{cluster_id}] {len(pending)} informational finding(s), "
+            print(f"[{cluster_id}] {len(pending)} informational finding(s), "
                   f"nothing worth an email yet")
         return 0
     if not pending:
         if verbose:
-            print(f"[{customer_id}/{cluster_id}] nothing pending")
+            print(f"[{cluster_id}] nothing pending")
         return 0
 
     recipients = [override_to] if override_to else spec.get("notify") or []
     if not recipients:
-        print(f"[{customer_id}/{cluster_id}] {len(pending)} pending but no recipient "
+        print(f"[{cluster_id}] {len(pending)} pending but no recipient "
               f"configured — skipping", file=sys.stderr)
         return 0
 
@@ -474,7 +474,7 @@ def notify_cluster(spec: dict, root: Path, outbox: Path, send: bool,
     if summary_path.exists():
         days = json.loads(summary_path.read_text()).get("days_of_history")
 
-    work = outbox / f"{customer_id}-{cluster_id}"
+    work = outbox / cluster_id
     work.mkdir(parents=True, exist_ok=True)
     sender = (smtp or {}).get("from", "bighole@localhost")
     # Every finding on record, not just the pending ones: the resize that explains tonight's
@@ -492,7 +492,7 @@ def notify_cluster(spec: dict, root: Path, outbox: Path, send: bool,
         target = work / f"{stamp}.eml"
         target.write_bytes(bytes(msg))
         if verbose:
-            print(f"[{customer_id}/{cluster_id}] {len(pending)} finding(s) -> {target}")
+            print(f"[{cluster_id}] {len(pending)} finding(s) -> {target}")
             print("  not sent (pass --send to actually deliver)")
         return 0
 
@@ -509,7 +509,7 @@ def notify_cluster(spec: dict, root: Path, outbox: Path, send: bool,
 
     mark_notified(base, {f["id"] for f in pending}, now())
     if verbose:
-        print(f"[{customer_id}/{cluster_id}] sent {len(pending)} finding(s) "
+        print(f"[{cluster_id}] sent {len(pending)} finding(s) "
               f"to {', '.join(recipients)}")
     return len(pending)
 
@@ -519,23 +519,22 @@ def main() -> int:
     ap.add_argument("--config", type=Path, default=Path("config.json"))
     ap.add_argument("--data", type=Path, default=Path("data"))
     ap.add_argument("--outbox", type=Path, default=Path("outbox"))
-    ap.add_argument("--customer", help="notify only this customer_id")
+    ap.add_argument("--cluster", help="only this cluster id")
     ap.add_argument("--to", help="send everything to this address instead")
     ap.add_argument("--send", action="store_true",
                     help="actually deliver; without this the message is only written to disk")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
-    if not args.config.exists():
-        print(f"{args.config} does not exist — copy config.example.json", file=sys.stderr)
+    try:
+        cfg = config.load(args.config)
+    except config.ConfigError as e:
+        print(e, file=sys.stderr)
         return 2
-
-    cfg = json.loads(args.config.read_text())
-    smtp = cfg.get("smtp")
-
-    clusters = load_clusters(args.config)
-    if args.customer:
-        clusters = [c for c in clusters if c["customer_id"] == args.customer]
+    smtp = config.smtp(cfg)
+    clusters = config.clusters(cfg)
+    if args.cluster:
+        clusters = [c for c in clusters if c["cluster_id"] == args.cluster]
 
     sent = failed = 0
     for spec in clusters:
@@ -544,7 +543,7 @@ def main() -> int:
                                    args.to, smtp, verbose=not args.quiet)
         except Exception as e:
             failed += 1
-            print(f"[{spec['customer_id']}/{spec['cluster_id']}] FAILED: "
+            print(f"[{spec['cluster_id']}] FAILED: "
                   f"{type(e).__name__}: {e}", file=sys.stderr)
 
     if not args.quiet and args.send:

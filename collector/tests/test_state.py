@@ -25,7 +25,7 @@ NAME = "metrics.2026-08-07T01-15-12Z-00000"
 
 
 def fresh() -> State:
-    return State(customer_id="c", cluster_id="k")
+    return State(cluster_id="k")
 
 
 # --------------------------------------------------------------- bug 1: they are not frozen
@@ -176,7 +176,7 @@ def test_roundtrip_through_disk(tmp_path: Path):
     s.reported_findings.append("abc123")
     s.save(tmp_path / "state.json")
 
-    back = State.load(tmp_path / "state.json", "c", "k")
+    back = State.load(tmp_path / "state.json", "k")
     assert back.files[f"{NODE}/{NAME}"].stable
     assert back.last_capture == s.last_capture
     assert back.reported_findings == ["abc123"]
@@ -204,7 +204,7 @@ def test_an_old_state_inherits_its_last_arrival_from_its_last_run(tmp_path):
     one -- so it could never be reported as unwatched, which is the one cluster that needed it.
     """
     path = tmp_path / "state.json"
-    path.write_text(json.dumps({"customer_id": "acme", "cluster_id": "prod",
+    path.write_text(json.dumps({"cluster_id": "prod",
                                 "last_capture": "2026-08-20T10:00:00+00:00", "files": {}}))
 
-    assert State.load(path, "acme", "prod").last_new_data == "2026-08-20T10:00:00+00:00"
+    assert State.load(path, "prod").last_new_data == "2026-08-20T10:00:00+00:00"

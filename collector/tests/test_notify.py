@@ -30,7 +30,7 @@ def a_finding(fid="f1", rule="memory-low", node="n0", severity="critical",
               at=None) -> dict:
     inicio = T0 if at is None else at
     return {
-        "id": fid, "customer_id": "acme", "cluster_id": "prod",
+        "id": fid, "cluster_id": "prod",
         "detected_at": "2026-08-09T12:00:00+00:00", "notified_at": notified,
         "rule": rule, "title": title, "severity": severity,
         "node": f"{node}.abcde.mongodb.net", "metric": "pct(a,b)", "episodes": 1,
@@ -243,11 +243,11 @@ def test_a_collector_with_no_web_app_sends_no_links(tmp_path: Path, monkeypatch)
 # ------------------------------------------------------- context does not send mail alone
 
 def _cluster_with(tmp_path: Path, findings: list[dict]) -> tuple[dict, Path, Path]:
-    base = tmp_path / "acme" / "prod"
+    base = tmp_path / "prod"
     base.mkdir(parents=True)
     (base / "findings.jsonl").write_text(
         "".join(json.dumps(f) + "\n" for f in findings))
-    return ({"customer_id": "acme", "cluster_id": "prod", "notify": ["dba@x"]},
+    return ({"cluster_id": "prod", "notify": ["dba@x"]},
             tmp_path, tmp_path / "outbox")
 
 
@@ -308,7 +308,7 @@ def test_context_stays_pending_until_something_happens(tmp_path: Path):
     spec, root, outbox = _cluster_with(tmp_path, [_finding("info", "setting-changed", "a")])
     notify_cluster(spec, root, outbox, send=False, override_to=None, smtp=None, verbose=False)
 
-    assert len(read_pending(root / "acme" / "prod")) == 1
+    assert len(read_pending(root / "prod")) == 1
 
 
 def test_the_email_names_what_changed_before_the_incident(tmp_path: Path):
@@ -375,7 +375,7 @@ import notify  # noqa: E402
 def test_a_muted_rule_sends_no_email(tmp_path, monkeypatch):
     """The alternative to offering this is not a quieter product: it is a customer who filters
     the address, and then the message that mattered is filtered too."""
-    base = tmp_path / "acme" / "prod"
+    base = tmp_path / "prod"
     base.mkdir(parents=True)
     (base / "findings.jsonl").write_text(json.dumps({
         "id": "f1", "rule": "cache-full", "severity": "critical", "title": "Cache full",
@@ -383,7 +383,7 @@ def test_a_muted_rule_sends_no_email(tmp_path, monkeypatch):
         "secondsInState": 1, "what": "", "check": "", "notified_at": None}) + "\n")
 
     sent = notify.notify_cluster(
-        {"customer_id": "acme", "cluster_id": "prod", "notify": ["a@b.test"],
+        {"cluster_id": "prod", "notify": ["a@b.test"],
          "mute": ["cache-full"]},
         tmp_path, tmp_path / "outbox", send=False, override_to=None, smtp=None, verbose=False)
 
@@ -396,7 +396,7 @@ def test_a_muted_rule_sends_no_email(tmp_path, monkeypatch):
 def test_muting_one_rule_does_not_silence_the_others(tmp_path):
     """The failure that would make this worse than useless: asking for quiet about one thing and
     getting quiet about everything."""
-    base = tmp_path / "acme" / "prod"
+    base = tmp_path / "prod"
     base.mkdir(parents=True)
     (base / "findings.jsonl").write_text("".join(json.dumps(f) + "\n" for f in [
         {"id": "f1", "rule": "cache-full", "severity": "critical", "title": "Cache full",
@@ -407,7 +407,7 @@ def test_muting_one_rule_does_not_silence_the_others(tmp_path):
          "secondsInState": 1, "what": "", "check": "", "notified_at": None}]))
 
     notify.notify_cluster(
-        {"customer_id": "acme", "cluster_id": "prod", "notify": ["a@b.test"],
+        {"cluster_id": "prod", "notify": ["a@b.test"],
          "mute": ["cache-full"]},
         tmp_path, tmp_path / "outbox", send=False, override_to=None, smtp=None, verbose=False)
 
@@ -422,7 +422,7 @@ def test_muted_findings_are_settled_even_when_the_rest_is_only_context(tmp_path)
     muted findings stayed pending for ever and every hourly run printed the same line about
     them -- the exact noise muting exists to remove.
     """
-    base = tmp_path / "acme" / "prod"
+    base = tmp_path / "prod"
     base.mkdir(parents=True)
     (base / "findings.jsonl").write_text("".join(json.dumps(f) + "\n" for f in [
         {"id": "f1", "rule": "cache-full", "severity": "critical", "title": "Cache full",
@@ -433,7 +433,7 @@ def test_muted_findings_are_settled_even_when_the_rest_is_only_context(tmp_path)
          "secondsInState": 1, "what": "", "check": "", "notified_at": None}]))
 
     notify.notify_cluster(
-        {"customer_id": "acme", "cluster_id": "prod", "notify": ["a@b.test"],
+        {"cluster_id": "prod", "notify": ["a@b.test"],
          "mute": ["cache-full"]},
         tmp_path, tmp_path / "outbox", send=False, override_to=None, smtp=None, verbose=False)
 

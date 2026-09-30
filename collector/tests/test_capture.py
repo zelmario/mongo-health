@@ -20,7 +20,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import sources  # noqa: E402
-from capture import capture_cluster, load_clusters  # noqa: E402
+from capture import capture_cluster  # noqa: E402
 from sources import AtlasSource, node_from_path  # noqa: E402
 from state import State  # noqa: E402
 
@@ -39,7 +39,7 @@ def make_source_dir(tmp: Path, files: dict[str, list[tuple[str, int]]]) -> Path:
 
 
 def spec_for(path: Path) -> dict:
-    return {"customer_id": "acme", "cluster_id": "prod", "notify": [],
+    return {"cluster_id": "prod", "notify": [],
             "source": {"type": "directory", "path": str(path)}}
 
 
@@ -73,7 +73,7 @@ def test_first_capture_stores_everything(tmp_path: Path):
     result = capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
     assert result["files_new"] == 3
     assert result["nodes"] == 2
-    stored = sorted(p.name for p in (tmp_path / "data/acme/prod/ftdc").rglob("metrics.*"))
+    stored = sorted(p.name for p in (tmp_path / "data/prod/ftdc").rglob("metrics.*"))
     assert stored == [NAME, NAME, "metrics.interim"]
 
 
@@ -94,7 +94,7 @@ def test_a_grown_file_is_stored_again(tmp_path: Path):
     again = capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
 
     assert again["files_new"] == 1
-    stored = tmp_path / "data/acme/prod/ftdc/n0" / NAME
+    stored = tmp_path / "data/prod/ftdc/n0" / NAME
     assert stored.stat().st_size == 9000, "the stored copy must be the grown one"
 
 
@@ -124,7 +124,7 @@ def test_usage_is_recorded(tmp_path: Path):
     src = make_source_dir(tmp_path, {"n0": [(NAME, 1000)]})
     capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
     rows = [json.loads(l) for l in
-            (tmp_path / "data/acme/prod/usage.jsonl").read_text().splitlines() if l]
+            (tmp_path / "data/prod/usage.jsonl").read_text().splitlines() if l]
     assert rows[0]["operation"] == "capture"
     assert rows[0]["bytes_new"] == 1000
 
@@ -132,24 +132,9 @@ def test_usage_is_recorded(tmp_path: Path):
 def test_state_survives_between_runs(tmp_path: Path):
     src = make_source_dir(tmp_path, {"n0": [(NAME, 1000)]})
     capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
-    state = State.load(tmp_path / "data/acme/prod/state.json", "acme", "prod")
+    state = State.load(tmp_path / "data/prod/state.json", "prod")
     assert state.last_capture is not None
     assert f"n0/{NAME}" in state.files
-
-
-# ------------------------------------------------------------------------------ the config
-
-def test_load_clusters_flattens_customers(tmp_path: Path):
-    cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({"customers": [
-        {"id": "a", "notify": ["a@x"], "clusters": [{"id": "c1", "source": {}},
-                                                    {"id": "c2", "source": {}}]},
-        {"id": "b", "notify": [], "clusters": [{"id": "c3", "source": {}}]},
-    ]}))
-    out = load_clusters(cfg)
-    assert [(c["customer_id"], c["cluster_id"]) for c in out] == [
-        ("a", "c1"), ("a", "c2"), ("b", "c3")]
-    assert out[0]["notify"] == ["a@x"]
 
 
 # --------------------------------------------------------------------- the Atlas date filter
@@ -282,13 +267,13 @@ def test_a_job_that_outran_the_deadline_is_remembered(monkeypatch, tmp_path):
     monkeypatch.setattr(AtlasSource, "BOOTSTRAP_TIMEOUT", 0)
     monkeypatch.setattr(sources.time, "sleep", lambda s: None)
 
-    spec = {"customer_id": "acme", "cluster_id": "c0",
+    spec = {"cluster_id": "c0",
             "source": {"type": "atlas", "group_id": "g", "replica_set": "rs",
                        "public_key": "p", "private_key": "k"}}
     with pytest.raises(TimeoutError):
         capture_cluster(spec, tmp_path, verbose=False)
 
-    state = State.load(tmp_path / "acme" / "c0" / "state.json", "acme", "c0")
+    state = State.load(tmp_path / "c0" / "state.json", "c0")
     assert state.pending_job == "job7"
     assert state.last_capture is None, "a run that collected nothing did not capture"
 
@@ -306,19 +291,19 @@ def test_the_next_run_collects_the_pending_job_instead_of_ordering_another(monke
                         lambda self, job_id, target: collected.append(job_id))
     monkeypatch.setattr(sources.tarfile, "open", lambda *a, **kw: _EmptyTar())
 
-    base = tmp_path / "acme" / "c0"
+    base = tmp_path / "c0"
     base.mkdir(parents=True)
-    state = State(customer_id="acme", cluster_id="c0", pending_job="job7")
+    state = State(cluster_id="c0", pending_job="job7")
     state.save(base / "state.json")
 
-    spec = {"customer_id": "acme", "cluster_id": "c0",
+    spec = {"cluster_id": "c0",
             "source": {"type": "atlas", "group_id": "g", "replica_set": "rs",
                        "public_key": "p", "private_key": "k"}}
     capture_cluster(spec, tmp_path, verbose=False)
 
     assert collected == ["job7"], "the bundle already built is the one to download"
     assert ordered == [], "ordering a second one pays the slow part twice"
-    reloaded = State.load(base / "state.json", "acme", "c0")
+    reloaded = State.load(base / "state.json", "c0")
     assert reloaded.pending_job is None, "collected: nothing left pending"
 
 

@@ -5,14 +5,11 @@ Runs hourly from cron. Deliberately boring: download, deduplicate, store, record
 it did. All the analysis lives in `analyze.py`.
 
     python3 capture.py --config config.json
-    python3 capture.py --config config.json --customer acme   # just one
+    python3 capture.py --config config.json --cluster orders-prod   # just one
 
-The storage layout carries customer and cluster from day one, even though there is only one
-of each today: adding the second customer has to be a line of config, not a data migration.
-
-    data/{customer_id}/{cluster_id}/ftdc/{node}/metrics.*
-    data/{customer_id}/{cluster_id}/state.json
-    data/{customer_id}/{cluster_id}/usage.jsonl
+    data/{cluster_id}/ftdc/{node}/metrics.*
+    data/{cluster_id}/state.json
+    data/{cluster_id}/usage.jsonl
 """
 from __future__ import annotations
 
@@ -21,31 +18,12 @@ import json
 import shutil
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
 
 import progress
 import sources
+from config import ConfigError, load_clusters
 from state import State, now
-
-
-def load_clusters(path: Path) -> list[dict]:
-    """Every configured cluster, flattened into the shape the rest of the collector reads."""
-    cfg = json.loads(path.read_text())
-    out = []
-    for customer in cfg["customers"]:
-        for cluster in customer["clusters"]:
-            out.append(
-                {
-                    "customer_id": customer["id"],
-                    "cluster_id": cluster["id"],
-                    "source": cluster["source"],
-                    "notify": customer.get("notify", []),
-                    # Rules this cluster does not want emails about.
-                    "mute": cluster.get("mute", []),
-                }
-            )
-    return out
 
 
 ROSTER = "roster.json"
@@ -66,9 +44,8 @@ def write_roster(data: Path, clusters: list[dict]) -> None:
     data.mkdir(parents=True, exist_ok=True)
     payload = {
         "written_at": now(),
-        "clusters": [{"customer_id": c["customer_id"], "cluster_id": c["cluster_id"],
-                      # How the files arrive decides how long silence is allowed to last, and
-                      # what the email should tell the customer to go and look at.
+        "clusters": [{"cluster_id": c["cluster_id"],
+                      # How the files arrive decides what the alert tells you to go and look at.
                       "source_kind": (c.get("source") or {}).get("type", "atlas")}
                      for c in clusters],
     }
@@ -78,21 +55,18 @@ def write_roster(data: Path, clusters: list[dict]) -> None:
 
 
 def record_usage(base: Path, **fields) -> None:
-    """One line per run, so we can tell later what each customer costs.
-
-    Nobody is paying yet, but without this there is no way to price with any grounding, nor
-    to know the real cost per customer. Cheap now, impossible to reconstruct later.
-    """
+    """One line per run: what was fetched and how long it took. Cheap now, impossible to
+    reconstruct later, and the first thing to look at when a run gets slow."""
     line = {"at": now(), **fields}
     with (base / "usage.jsonl").open("a") as fh:
         fh.write(json.dumps(line, sort_keys=True) + "\n")
 
 
 def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
-    customer_id, cluster_id = spec["customer_id"], spec["cluster_id"]
-    base = root / customer_id / cluster_id
+    cluster_id = spec["cluster_id"]
+    base = root / cluster_id
     ftdc = base / "ftdc"
-    state = State.load(base / "state.json", customer_id, cluster_id)
+    state = State.load(base / "state.json", cluster_id)
 
     source = sources.build(spec["source"], pending_job=state.pending_job,
                            job_estimate=state.last_job_seconds,
@@ -112,7 +86,7 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
     nodes: set[str] = set()
 
     if verbose:
-        print(f"[{customer_id}/{cluster_id}] {source.describe()}")
+        print(f"[{cluster_id}] {source.describe()}")
 
     try:
         for f in source.fetch(since):
@@ -166,7 +140,6 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
     state.save(base / "state.json")
 
     summary = {
-        "customer_id": customer_id,
         "cluster_id": cluster_id,
         "source": source.describe(),
         "operation": "capture",
@@ -192,22 +165,22 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, default=Path("config.json"))
     ap.add_argument("--data", type=Path, default=Path("data"))
-    ap.add_argument("--customer", help="capture only this customer_id")
+    ap.add_argument("--cluster", help="only this cluster id")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
-    if not args.config.exists():
-        print(f"{args.config} does not exist — copy config.example.json", file=sys.stderr)
+    try:
+        clusters = load_clusters(args.config)
+    except ConfigError as e:
+        print(e, file=sys.stderr)
         return 2
-
-    clusters = load_clusters(args.config)
     # Written before the filter and before any capture: this is the list of clusters somebody
     # is supposed to be watching, which is a different question from which ones this invocation
     # happens to touch. A partial run must not shrink it.
-    if not args.customer:
+    if not args.cluster:
         write_roster(args.data, clusters)
-    if args.customer:
-        clusters = [c for c in clusters if c["customer_id"] == args.customer]
+    if args.cluster:
+        clusters = [c for c in clusters if c["cluster_id"] == args.cluster]
     if not clusters:
         print("no clusters to capture", file=sys.stderr)
         return 1
@@ -222,7 +195,7 @@ def main() -> int:
             # paper over it.
             failed += 1
             print(
-                f"[{spec['customer_id']}/{spec['cluster_id']}] FAILED: "
+                f"[{spec['cluster_id']}] FAILED: "
                 f"{type(e).__name__}: {e}",
                 file=sys.stderr,
             )

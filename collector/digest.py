@@ -31,7 +31,7 @@ from email.message import EmailMessage
 from pathlib import Path
 
 import mailheaders
-from capture import load_clusters
+import config
 from group import group as group_findings, moments
 from state import now
 
@@ -141,14 +141,18 @@ def main() -> int:
     ap.add_argument("--to", help="override every recipient")
     args = ap.parse_args()
 
-    cfg = json.loads(args.config.read_text()) if args.config.exists() else {}
-    smtp = cfg.get("smtp")
+    try:
+        cfg = config.load(args.config)
+    except config.ConfigError as e:
+        print(e, file=sys.stderr)
+        return 2
+    smtp = config.smtp(cfg)
     sender = (smtp or {}).get("from", "collector@localhost")
     since_ms = int((datetime.now(timezone.utc) - timedelta(days=7)).timestamp() * 1000)
 
     sent = 0
-    for spec in load_clusters(args.config):
-        base = args.data / spec["customer_id"] / spec["cluster_id"]
+    for spec in config.clusters(cfg):
+        base = args.data / spec["cluster_id"]
         summary = read_summary(base)
         if not summary:
             # Nothing has been captured yet. A weekly note about a cluster that has never
@@ -173,13 +177,13 @@ def main() -> int:
                 if smtp.get("user"):
                     server.login(smtp["user"], smtp["password"])
                 server.send_message(msg)
-            print(f"[{spec['customer_id']}/{spec['cluster_id']}] sent to {recipients[0]}")
+            print(f"[{spec['cluster_id']}] sent to {recipients[0]}")
         else:
-            folder = args.outbox / f"{spec['customer_id']}-{spec['cluster_id']}"
+            folder = args.outbox / spec['cluster_id']
             folder.mkdir(parents=True, exist_ok=True)
             target = folder / f"digest-{now().replace(':', '').replace('-', '')}.eml"
             target.write_bytes(bytes(msg))
-            print(f"[{spec['customer_id']}/{spec['cluster_id']}] -> {target}")
+            print(f"[{spec['cluster_id']}] -> {target}")
         sent += 1
 
     print(f"{sent} digest(s)")

@@ -1,6 +1,6 @@
 """The guard that notices the collector stopped.
 
-This is the last thing standing between a customer and a service that quietly died. Everything
+This is the last thing standing between you and a service that quietly died. Everything
 else in the system reports on clusters; this reports on the reporter, and it is deliberately
 built to keep working when the rest does not — it reads state files and the clock, nothing else.
 
@@ -21,15 +21,14 @@ from watchdog import STALE_AFTER_HOURS, check, compose  # noqa: E402
 NOW = datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc)
 
 
-def cluster(tmp: Path, customer="acme", name="prod", last_capture=None,
-            raw: str | None = None) -> Path:
-    base = tmp / customer / name
+def cluster(tmp: Path, name="prod", last_capture=None, raw: str | None = None) -> Path:
+    base = tmp / name
     base.mkdir(parents=True, exist_ok=True)
     if raw is not None:
         (base / "state.json").write_text(raw)
     else:
         (base / "state.json").write_text(json.dumps({
-            "customer_id": customer, "cluster_id": name,
+            "cluster_id": name,
             "last_capture": last_capture, "files": {}}))
     return base
 
@@ -92,7 +91,7 @@ def test_the_worst_offender_comes_first(tmp_path: Path):
 
 
 def test_the_threshold_is_configurable(tmp_path: Path):
-    """A customer on a tighter schedule needs a tighter alarm."""
+    """A tighter schedule needs a tighter alarm."""
     cluster(tmp_path, last_capture=ago(hours=3))
     assert check(tmp_path, NOW, 2) != []
     assert check(tmp_path, NOW, 6) == []
@@ -105,7 +104,7 @@ def test_the_alert_separates_the_collector_from_the_clusters(tmp_path: Path):
 
     Conflating the two would send somebody to debug a database that is fine.
     """
-    problems = [{"customer": "acme", "cluster": "prod", "hours": 20.0,
+    problems = [{"cluster": "prod", "hours": 20.0,
                  "why": "last capture 20 h ago"}]
     body = compose(problems, ["ops@x"], "c@x", NOW).get_content()
     assert "not about the clusters themselves" in body
@@ -116,35 +115,35 @@ def test_the_alert_says_the_status_page_is_stale(tmp_path: Path):
 
     Whoever reads this must not be reassured by looking at it.
     """
-    problems = [{"customer": "acme", "cluster": "prod", "hours": 20.0, "why": "x"}]
+    problems = [{"cluster": "prod", "hours": 20.0, "why": "x"}]
     assert "last run" in compose(problems, ["ops@x"], "c@x", NOW).get_content()
 
 
 def test_the_alert_names_every_affected_cluster(tmp_path: Path):
-    problems = [{"customer": "acme", "cluster": f"c{i}", "hours": 20.0, "why": "x"}
+    problems = [{"cluster": f"c{i}", "hours": 20.0, "why": "x"}
                 for i in range(3)]
     body = compose(problems, ["ops@x"], "c@x", NOW).get_content()
     assert all(f"c{i}" in body for i in range(3))
 
 
 def test_a_single_failure_is_named_in_the_subject(tmp_path: Path):
-    problems = [{"customer": "acme", "cluster": "prod", "hours": 20.0, "why": "x"}]
-    assert "acme/prod" in compose(problems, ["ops@x"], "c@x", NOW)["Subject"]
+    problems = [{"cluster": "prod", "hours": 20.0, "why": "x"}]
+    assert "prod" in compose(problems, ["ops@x"], "c@x", NOW)["Subject"]
 
 
 def test_the_alert_carries_where_to_look(tmp_path: Path):
     """An alarm without a next step gets acknowledged and forgotten."""
-    problems = [{"customer": "acme", "cluster": "prod", "hours": 20.0, "why": "x"}]
+    problems = [{"cluster": "prod", "hours": 20.0, "why": "x"}]
     body = compose(problems, ["ops@x"], "c@x", NOW).get_content()
     assert "cron" in body and "API key" in body
 
 
 # --------------------------------------------------------------- what is not being watched
 
-def roster(tmp: Path, *names: tuple[str, str]) -> None:
+def roster(tmp: Path, *names: str) -> None:
     (tmp / "roster.json").write_text(json.dumps({
         "written_at": NOW.isoformat(),
-        "clusters": [{"customer_id": c, "cluster_id": n} for c, n in names],
+        "clusters": [{"cluster_id": n} for n in names],
     }))
 
 
@@ -157,7 +156,7 @@ def test_a_paused_cluster_stops_being_alarming(tmp_path: Path):
     """
     cluster(tmp_path, name="watched", last_capture=ago(hours=1))
     cluster(tmp_path, name="paused", last_capture=ago(days=4))
-    roster(tmp_path, ("acme", "watched"))
+    roster(tmp_path, "watched")
 
     assert check(tmp_path, NOW, STALE_AFTER_HOURS) == []
 
@@ -165,7 +164,7 @@ def test_a_paused_cluster_stops_being_alarming(tmp_path: Path):
 def test_a_cluster_on_the_roster_is_still_judged(tmp_path: Path):
     """The roster narrows what is watched; it does not excuse what is."""
     cluster(tmp_path, name="prod", last_capture=ago(days=4))
-    roster(tmp_path, ("acme", "prod"))
+    roster(tmp_path, "prod")
 
     problems = check(tmp_path, NOW, STALE_AFTER_HOURS)
     assert [p["cluster"] for p in problems] == ["prod"]
@@ -188,7 +187,7 @@ def test_a_corrupt_roster_does_not_silence_the_watchdog(tmp_path: Path):
     outage would go unreported because of one bad JSON file.
     """
     cluster(tmp_path, name="prod", last_capture=ago(days=4))
-    (tmp_path / "roster.json").write_text('{"clusters": [{"customer_id": "acme"')
+    (tmp_path / "roster.json").write_text('{"clusters": [{"cluster_id": "pro')
 
     assert len(check(tmp_path, NOW, STALE_AFTER_HOURS)) == 1
 
@@ -200,10 +199,9 @@ import watchdog  # noqa: E402
 SMTP = {"host": "localhost", "port": 1025, "from": "Collector <collector@example.com>"}
 
 
-def entry(customer="acme", name="prod", to=("dba@acme.test",), kind="atlas") -> dict:
+def entry(name="prod", kind="atlas") -> dict:
     """A roster line the way `capture.write_roster` writes it."""
-    return {"customer_id": customer, "cluster_id": name,
-            "notify": list(to), "source_kind": kind}
+    return {"cluster_id": name, "source_kind": kind}
 
 
 def owner_roster(tmp: Path, *entries: dict) -> None:
@@ -238,10 +236,10 @@ def test_the_all_clear_counts_only_what_is_watched(tmp_path, monkeypatch, capsys
 # ------------------------------------------------- when we are looking at a dead source
 
 def with_arrivals(tmp: Path, name: str, ran: str, arrived: str | None, kind="directory") -> None:
-    base = tmp / "acme" / name
+    base = tmp / name
     base.mkdir(parents=True, exist_ok=True)
     (base / "state.json").write_text(json.dumps({
-        "customer_id": "acme", "cluster_id": name, "source_kind": kind,
+        "cluster_id": name, "source_kind": kind,
         "last_capture": ran, "last_new_data": arrived, "files": {}}))
 
 
@@ -287,7 +285,7 @@ def test_a_state_written_before_arrivals_were_tracked_uses_what_it_has(tmp_path:
 # ------------------------------------------------------ not saying the same thing every hour
 
 def problem(cluster="prod", last_data="2026-08-19T12:00:00+00:00", hours=9.0) -> dict:
-    return {"customer": "acme", "cluster": cluster, "hours": hours,
+    return {"cluster": cluster, "hours": hours,
             "last_data": last_data, "notify": [], "why": f"no new data for {hours:.0f} h"}
 
 
@@ -350,6 +348,19 @@ def test_a_quiet_repeat_still_exits_non_zero(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", argv)
     assert watchdog.main() == 1
     assert "already alerted" in capsys.readouterr().out
+
+
+def test_without_an_operator_the_alert_goes_to_notify(tmp_path, monkeypatch):
+    """One person running this for their own clusters should not have to name themselves twice."""
+    cluster(tmp_path, name="prod", last_capture=ago(hours=9))
+    (tmp_path / "config.json").write_text(json.dumps(
+        {"notify": ["me@x.test"], "smtp": {"host": "localhost", "port": 1025}, "clusters": []}))
+    sent = []
+    monkeypatch.setattr(watchdog, "send", lambda msg, smtp: sent.append(msg))
+    monkeypatch.setattr(sys, "argv", ["watchdog", "--data", str(tmp_path), "--config",
+                                      str(tmp_path / "config.json"), "--send"])
+    assert watchdog.main() == 1
+    assert [m["To"] for m in sent] == ["me@x.test"]
 
 
 # ------------------------------------------------------- two copies running at the same time

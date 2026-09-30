@@ -17,6 +17,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import onboard  # noqa: E402
+import config  # noqa: E402
 from onboard import add_to_config, discover  # noqa: E402
 
 SRV = ("mongodb://cluster0-shard-00-00.abcde.mongodb.net:27017,"
@@ -104,52 +105,57 @@ def test_a_wrong_project_says_which_call_lists_the_right_one(monkeypatch):
 
 # ----------------------------------------------------------------------------- the config
 
-def test_a_new_customer_is_added(tmp_path: Path):
+KEYS = {"public_key": "pub", "private_key": "priv"}
+
+
+def test_a_cluster_is_added(tmp_path: Path):
     cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({"customers": []}))
-    added = add_to_config(cfg, "acme", ["a@x"], "g", "pub", "priv",
-                          [{"name": "c1", "replica_set": "rs1"}], 14)
+    cfg.write_text(json.dumps({"clusters": []}))
+    added = add_to_config(cfg, ["a@x"], "g", [{"name": "c1", "replica_set": "rs1"}], KEYS)
     assert added == 1
     written = json.loads(cfg.read_text())
-    assert written["customers"][0]["id"] == "acme"
-    assert written["customers"][0]["retention_days"] == 14
-    assert written["customers"][0]["clusters"][0]["source"]["replica_set"] == "rs1"
+    assert written["notify"] == ["a@x"]
+    assert written["clusters"][0]["id"] == "c1"
+    assert written["clusters"][0]["source"]["replica_set"] == "rs1"
 
 
-def test_an_existing_customer_keeps_their_clusters(tmp_path: Path):
-    """Onboarding a second cluster must not wipe the first."""
+def test_what_onboarding_writes_is_a_valid_config(tmp_path: Path):
+    """The file has one reader, and it is strict; the writer must not be looser than it."""
     cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({"customers": [
-        {"id": "acme", "notify": ["a@x"], "clusters": [{"id": "old", "source": {}}]}]}))
-    add_to_config(cfg, "acme", ["a@x"], "g", "pub", "priv",
-                  [{"name": "new", "replica_set": "rs2"}], 365)
-    ids = [c["id"] for c in json.loads(cfg.read_text())["customers"][0]["clusters"]]
-    assert ids == ["old", "new"]
+    add_to_config(cfg, ["a@x"], "g", [{"name": "c1", "replica_set": "rs1"}], KEYS)
+    assert [c["cluster_id"] for c in config.load_clusters(cfg)] == ["c1"]
+
+
+def test_keys_from_the_environment_stay_out_of_the_file(tmp_path: Path):
+    """Somebody who put the key in the environment chose not to have it on disk."""
+    cfg = tmp_path / "config.json"
+    add_to_config(cfg, [], "g", [{"name": "c1", "replica_set": "rs1"}], None)
+    source = json.loads(cfg.read_text())["clusters"][0]["source"]
+    assert "public_key" not in source and "private_key" not in source
+
+
+def test_existing_clusters_and_settings_are_kept(tmp_path: Path):
+    """Onboarding a second cluster must not wipe the first, nor who is notified."""
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"notify": ["first@x"], "clusters": [{"id": "old", "source": {}}]}))
+    add_to_config(cfg, ["second@x"], "g", [{"name": "new", "replica_set": "rs2"}], KEYS)
+    written = json.loads(cfg.read_text())
+    assert [c["id"] for c in written["clusters"]] == ["old", "new"]
+    assert written["notify"] == ["first@x"]
 
 
 def test_signing_up_the_same_cluster_twice_is_harmless(tmp_path: Path):
     """Re-running onboarding must not duplicate it, or the cron would capture it twice."""
     cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({"customers": []}))
     clusters = [{"name": "c1", "replica_set": "rs1"}]
-    add_to_config(cfg, "acme", [], "g", "pub", "priv", clusters, 14)
-    added = add_to_config(cfg, "acme", [], "g", "pub", "priv", clusters, 14)
+    add_to_config(cfg, [], "g", clusters, KEYS)
+    added = add_to_config(cfg, [], "g", clusters, KEYS)
     assert added == 0
-    assert len(json.loads(cfg.read_text())["customers"][0]["clusters"]) == 1
+    assert len(json.loads(cfg.read_text())["clusters"]) == 1
 
 
 def test_the_config_is_not_world_readable(tmp_path: Path):
-    """It holds private keys for every customer's project."""
+    """It can hold the private key."""
     cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({"customers": []}))
-    add_to_config(cfg, "acme", [], "g", "pub", "priv",
-                  [{"name": "c1", "replica_set": "rs1"}], 14)
+    add_to_config(cfg, [], "g", [{"name": "c1", "replica_set": "rs1"}], KEYS)
     assert cfg.stat().st_mode & 0o077 == 0, "no access for group or others"
-
-
-def test_a_missing_config_is_created(tmp_path: Path):
-    """First onboarding on a fresh install must not require a file to exist first."""
-    cfg = tmp_path / "config.json"
-    add_to_config(cfg, "acme", [], "g", "pub", "priv",
-                  [{"name": "c1", "replica_set": "rs1"}], 14)
-    assert cfg.exists()

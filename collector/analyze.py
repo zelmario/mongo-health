@@ -6,7 +6,7 @@ network operation that can fail for reasons of its own, analysing is pure local 
 over what is already on disk. One failing must not stop the other from running.
 
     python3 analyze.py --config config.json
-    python3 analyze.py --config config.json --customer acme
+    python3 analyze.py --config config.json --cluster orders-prod
     python3 analyze.py --config config.json --redo   # ignore what was analysed before
 
 Writes three things per cluster, each with a different use:
@@ -16,7 +16,7 @@ Writes three things per cluster, each with a different use:
                      the FIRST capture: once Atlas drops the raw data, this is all that is
                      left to later say "that is unusual for this cluster". It cannot be
                      reconstructed after the fact.
-    summary.json     the current state, which is what the customer sees on screen
+    summary.json     the current state, which is what the status page shows
 
 The engine lives in `runner/analyze.ts` and runs inside Big Hole, so that decoder, aliases
 and rules all live in one place.
@@ -38,7 +38,8 @@ import anomaly
 import progress
 import runway
 import sizing
-from capture import load_clusters, record_usage
+from capture import record_usage
+from config import ConfigError, load_clusters
 from state import State, now
 
 
@@ -105,7 +106,7 @@ def run_engine(ftdc: Path, since: str | None, timeout: int = 1800,
     return json.loads(r.stdout)
 
 
-def finding_id(customer_id: str, cluster_id: str, f: dict) -> str:
+def finding_id(cluster_id: str, f: dict) -> str:
     """Stable identity for a finding, so the same one is never reported twice.
 
     Built from the rule, the node and the start of the worst episode. It deliberately does
@@ -114,8 +115,8 @@ def finding_id(customer_id: str, cluster_id: str, f: dict) -> str:
 
     The start is bucketed to the minute for the same reason. Two runs judge different windows,
     so the first sample that crosses the threshold can differ by one sampling interval, and at
-    millisecond precision that produced two ids for one incident -- the customer saw the same
-    ticket saturation twice, charted two different ways. A minute is safely coarse: the grouper
+    millisecond precision that produced two ids for one incident -- one ticket saturation
+    reported twice, charted two different ways. A minute is safely coarse: the grouper
     already merges episodes within ten minutes of each other, so two genuinely distinct
     findings for one rule on one node are never seconds apart.
     """
@@ -127,7 +128,7 @@ def finding_id(customer_id: str, cluster_id: str, f: dict) -> str:
         # changed. Found in real data, where "the host was resized" silently replaced "the cache
         # was resized" on all three members.
         minute = int(f["worstFromMs"]) // 60_000
-        raw = f"{customer_id}/{cluster_id}/{f['rule']}/{f['node']}/{f['metric']}/{minute}"
+        raw = f"{cluster_id}/{f['rule']}/{f['node']}/{f['metric']}/{minute}"
     elif f["rule"] == "baseline-excursion":
         # Excursions get one id per metric per day, not one per window.
         #
@@ -137,10 +138,10 @@ def finding_id(customer_id: str, cluster_id: str, f: dict) -> str:
         # by window, the same excursion would be reported on every run for days. Keyed by day,
         # it is said once, and said again tomorrow only if it is still true.
         day = f.get("detected_day") or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        raw = f"{customer_id}/{cluster_id}/{f['rule']}/{f['node']}/{f['metric']}/{day}"
+        raw = f"{cluster_id}/{f['rule']}/{f['node']}/{f['metric']}/{day}"
     else:
         minute = int(f["worstFromMs"]) // 60_000
-        raw = f"{customer_id}/{cluster_id}/{f['rule']}/{f['node']}/{minute}"
+        raw = f"{cluster_id}/{f['rule']}/{f['node']}/{minute}"
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
@@ -198,10 +199,10 @@ def days_observed(baseline_path: Path) -> float:
 
 def analyze_cluster(spec: dict, root: Path, redo: bool = False,
                     verbose: bool = True) -> dict:
-    customer_id, cluster_id = spec["customer_id"], spec["cluster_id"]
-    base = root / customer_id / cluster_id
+    cluster_id = spec["cluster_id"]
+    base = root / cluster_id
     ftdc = base / "ftdc"
-    state = State.load(base / "state.json", customer_id, cluster_id)
+    state = State.load(base / "state.json", cluster_id)
 
     if not ftdc.exists():
         raise FileNotFoundError(f"nothing captured yet under {ftdc}")
@@ -209,11 +210,11 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
     pending = state.pending_analysis()
     if not pending and not redo:
         if verbose:
-            print(f"[{customer_id}/{cluster_id}] no new files")
-        return {"customer_id": customer_id, "cluster_id": cluster_id, "skipped": True}
+            print(f"[{cluster_id}] no new files")
+        return {"cluster_id": cluster_id, "skipped": True}
 
     if verbose:
-        print(f"[{customer_id}/{cluster_id}] {len(pending)} new file(s)")
+        print(f"[{cluster_id}] {len(pending)} new file(s)")
 
     t0 = time.monotonic()
     # One step, not a fraction of one: the engine is a single call that either produces
@@ -261,12 +262,11 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
               + anomaly.as_findings(excursions, window_from, window_to, nodes)
               + advice
               + ahead):
-        fid = finding_id(customer_id, cluster_id, f)
+        fid = finding_id(cluster_id, f)
         if fid in already:
             continue
         fresh.append({
             "id": fid,
-            "customer_id": customer_id,
             "cluster_id": cluster_id,
             "detected_at": stamp,
             "notified_at": None,
@@ -281,7 +281,6 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
     # only what arrived since the last run and is what gets judged against it.
     rows = [
         {
-            "customer_id": customer_id,
             "cluster_id": cluster_id,
             "node": node["node"],
             "run": stamp,
@@ -299,7 +298,6 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
     # --- summary: what the customer sees --------------------------------------------
     ftdc_bytes = sum(f.stat().st_size for f in ftdc.rglob("metrics.*") if f.is_file())
     summary = {
-        "customer_id": customer_id,
         "cluster_id": cluster_id,
         "updated_at": stamp,
         "last_capture": state.last_capture,
@@ -342,7 +340,6 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
     progress.report(base, "done")
 
     measured = {
-        "customer_id": customer_id,
         "cluster_id": cluster_id,
         "operation": "analyze",
         "files": len(pending),
@@ -371,22 +368,23 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, default=Path("config.json"))
     ap.add_argument("--data", type=Path, default=Path("data"))
-    ap.add_argument("--customer", help="analyse only this customer_id")
+    ap.add_argument("--cluster", help="only this cluster id")
     ap.add_argument("--redo", action="store_true",
                     help="re-analyse everything, ignoring what was analysed before")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
-    if not args.config.exists():
-        print(f"{args.config} does not exist — copy config.example.json", file=sys.stderr)
-        return 2
     if shutil.which("npx") is None:
         print("npx is missing: the analysis engine runs inside Big Hole", file=sys.stderr)
         return 2
 
-    clusters = load_clusters(args.config)
-    if args.customer:
-        clusters = [c for c in clusters if c["customer_id"] == args.customer]
+    try:
+        clusters = load_clusters(args.config)
+    except ConfigError as e:
+        print(e, file=sys.stderr)
+        return 2
+    if args.cluster:
+        clusters = [c for c in clusters if c["cluster_id"] == args.cluster]
     if not clusters:
         print("no clusters to analyse", file=sys.stderr)
         return 1
@@ -400,7 +398,7 @@ def main() -> int:
             # is loud on purpose.
             failed += 1
             print(
-                f"[{spec['customer_id']}/{spec['cluster_id']}] FAILED: "
+                f"[{spec['cluster_id']}] FAILED: "
                 f"{type(e).__name__}: {e}",
                 file=sys.stderr,
             )

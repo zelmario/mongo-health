@@ -90,11 +90,11 @@ def test_a_resumed_job_is_not_timed(monkeypatch):
 def test_a_capture_reports_what_it_is_storing(tmp_path):
     """Works for any source, not only Atlas: the count is of files, which they all yield."""
     root = make_source_dir(tmp_path, {"n1": [("metrics.2026-08-07T01-15-12Z-00000", 1024)]})
-    spec = {"customer_id": "acme", "cluster_id": "c0",
+    spec = {"cluster_id": "c0",
             "source": {"type": "directory", "path": str(root)}}
     capture_cluster(spec, tmp_path / "data", verbose=False)
 
-    state = progress.read(tmp_path / "data" / "acme" / "c0")
+    state = progress.read(tmp_path / "data" / "c0")
     assert state["phase"] == "store"
     assert state["done"] == 1
 
@@ -107,10 +107,10 @@ def test_the_measured_job_time_is_kept_for_the_next_run(monkeypatch, tmp_path):
     monkeypatch.setattr(AtlasSource, "_download", lambda self, job_id, target: None)
     monkeypatch.setattr(sources.tarfile, "open", lambda *a, **kw: _EmptyTar())
 
-    spec = {"customer_id": "acme", "cluster_id": "c0",
+    spec = {"cluster_id": "c0",
             "source": {"type": "atlas", "group_id": "g", "replica_set": "rs",
                        "public_key": "p", "private_key": "k"}}
     capture_cluster(spec, tmp_path, verbose=False)
 
-    state = State.load(tmp_path / "acme" / "c0" / "state.json", "acme", "c0")
+    state = State.load(tmp_path / "c0" / "state.json", "c0")
     assert state.last_job_seconds is not None

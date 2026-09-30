@@ -31,7 +31,7 @@ def ago(**kw) -> str:
 def cluster(findings=(), last_capture=None, observed=30.0, raw=30.0,
             unresolved=(), empty=False) -> dict:
     return {
-        "customer_id": "acme", "cluster_id": "prod",
+        "cluster_id": "prod",
         "last_capture": last_capture if last_capture is not None else ago(minutes=20),
         "nodes": [{"node": "n0", "hostname": "n0.mongodb.net", "version": "8.0.29",
                    "samples": 86_400, "from": ago(days=raw), "to": ago(minutes=1),
@@ -160,10 +160,10 @@ def test_a_cluster_with_no_summary_still_appears(tmp_path: Path):
     Omitting it would make a cluster that was never collected indistinguishable from one that
     does not exist.
     """
-    base = tmp_path / "acme" / "prod"
+    base = tmp_path / "prod"
     base.mkdir(parents=True)
     (base / "state.json").write_text(json.dumps(
-        {"customer_id": "acme", "cluster_id": "prod", "last_capture": None, "files": {}}))
+        {"cluster_id": "prod", "last_capture": None, "files": {}}))
     found = read_clusters(tmp_path)
     assert len(found) == 1 and found[0].get("empty")
 

@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """Sign up a cluster: find it, pull everything Atlas still has, and profile it.
 
-    python3 onboard.py --customer acme --group-id 60ad… --public-key … --private-key …
-    python3 onboard.py --customer acme --group-id 60ad… --cluster orders-prod   # just one
+    python3 onboard.py --group-id 60ad… --notify you@example.com
+    python3 onboard.py --group-id 60ad… --cluster orders-prod   # just one
 
-The point is that a new customer sees something the same day. Atlas holds 3 to 10 days of FTDC
-right now, and the moment they hand over a read-only key that history becomes theirs — so the
-first run pulls **all of it** rather than starting from zero and asking them to wait a week for
+The key comes from ATLAS_PUBLIC_KEY / ATLAS_PRIVATE_KEY, or from --public-key / --private-key;
+only the second way writes it into the config.
+
+The point is to see something the same day. Atlas holds 3 to 10 days of FTDC
+right now, and the moment a read-only key reaches it that history is kept — so the
+first run pulls **all of it** rather than starting from zero and waiting a week for
 the graphs to mean anything.
 
-That single fetch is also the cheapest part of the service: measured at 0.6 GB for an idle
-three-node cluster, 1.4 GB under real traffic. It costs almost nothing and it is the whole
-first impression.
+That single fetch is small: measured at 0.6 GB for an idle three-node cluster, 1.4 GB under
+real traffic.
 
 What it does, in order:
 
@@ -28,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -76,38 +79,28 @@ def discover(group_id: str, public_key: str, private_key: str) -> list[dict]:
     return out
 
 
-def add_to_config(path: Path, customer: str, notify: list[str], group_id: str,
-                  public_key: str, private_key: str, clusters: list[dict],
-                  retention_days: int) -> int:
-    """Merge the discovered clusters into the config, leaving existing ones alone."""
-    cfg = json.loads(path.read_text()) if path.exists() else {"customers": []}
-    cfg.setdefault("customers", [])
+def add_to_config(path: Path, notify: list[str], group_id: str, clusters: list[dict],
+                  keys: dict | None = None) -> int:
+    """Merge the discovered clusters into the config, leaving existing ones alone.
 
-    customer_entry = next((c for c in cfg["customers"] if c["id"] == customer), None)
-    if customer_entry is None:
-        customer_entry = {"id": customer, "notify": notify, "clusters": [],
-                          "retention_days": retention_days}
-        cfg["customers"].append(customer_entry)
-    customer_entry.setdefault("clusters", [])
+    `keys` are written into each source only when given. Keys that came from the environment
+    stay there: writing them out would put a secret into a file the user chose to keep clean.
+    """
+    cfg = json.loads(path.read_text()) if path.exists() else {}
+    cfg.setdefault("notify", notify)
+    cfg.setdefault("clusters", [])
 
     added = 0
     for c in clusters:
-        if any(existing["id"] == c["name"] for existing in customer_entry["clusters"]):
+        if any(existing["id"] == c["name"] for existing in cfg["clusters"]):
             continue
-        customer_entry["clusters"].append({
-            "id": c["name"],
-            "source": {
-                "type": "atlas",
-                "group_id": group_id,
-                "replica_set": c["replica_set"],
-                "public_key": public_key,
-                "private_key": private_key,
-            },
-        })
+        source = {"type": "atlas", "group_id": group_id, "replica_set": c["replica_set"]}
+        source.update(keys or {})
+        cfg["clusters"].append({"id": c["name"], "source": source})
         added += 1
 
     path.write_text(json.dumps(cfg, indent=2) + "\n")
-    path.chmod(0o600)  # it holds private keys
+    path.chmod(0o600)  # it may hold private keys, and it names every cluster
     return added
 
 
@@ -122,24 +115,31 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, default=Path("config.json"))
     ap.add_argument("--data", type=Path, default=Path("data"))
-    ap.add_argument("--customer", required=True)
-    ap.add_argument("--group-id", required=True)
-    ap.add_argument("--public-key", required=True)
-    ap.add_argument("--private-key", required=True)
+    ap.add_argument("--group-id", required=True, help="the Atlas project id")
+    ap.add_argument("--public-key", help="default: $ATLAS_PUBLIC_KEY")
+    ap.add_argument("--private-key", help="default: $ATLAS_PRIVATE_KEY")
     ap.add_argument("--cluster", action="append",
                     help="only this cluster; repeat for several. Default: all in the project")
     ap.add_argument("--notify", action="append", default=[],
-                    help="where findings go for this customer")
-    ap.add_argument("--retention-days", type=int, default=14,
-                    help="free tier keeps 14 days; paid keeps more")
+                    help="where findings go, when the config does not say yet")
     ap.add_argument("--discover-only", action="store_true",
                     help="list what is there and change nothing")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
+    public_key = args.public_key or os.environ.get("ATLAS_PUBLIC_KEY")
+    private_key = args.private_key or os.environ.get("ATLAS_PRIVATE_KEY")
+    if not (public_key and private_key):
+        print("no API key: set ATLAS_PUBLIC_KEY and ATLAS_PRIVATE_KEY, or pass "
+              "--public-key and --private-key", file=sys.stderr)
+        return 2
+    # Only a key typed on the command line goes into the file; see add_to_config.
+    keys = ({"public_key": public_key, "private_key": private_key}
+            if args.public_key and args.private_key else None)
+
     print(f"looking at project {args.group_id}")
     try:
-        found = discover(args.group_id, args.public_key, args.private_key)
+        found = discover(args.group_id, public_key, private_key)
     except Exception as e:
         print(f"could not list clusters: {e}", file=sys.stderr)
         return 1
@@ -174,30 +174,28 @@ def main() -> int:
     if args.discover_only:
         return 0
 
-    added = add_to_config(args.config, args.customer, args.notify, args.group_id,
-                          args.public_key, args.private_key, wanted, args.retention_days)
-    print(f"\n  {added} cluster(s) added to {args.config}, retention {args.retention_days} d")
+    added = add_to_config(args.config, args.notify, args.group_id, wanted, keys)
+    print(f"\n  {added} cluster(s) added to {args.config}")
 
     # The bootstrap itself: capture with no `--since`, which is what capture.py does for a
     # cluster it has never seen. Everything Atlas holds comes down in one go.
     print("\npulling everything Atlas still holds — this is the slow part")
-    ok = run(["python3", "capture.py", "--config", str(args.config), "--data", str(args.data),
-              "--customer", args.customer], args.quiet)
+    ok = all([run(["python3", "capture.py", "--config", str(args.config), "--data",
+                   str(args.data), "--cluster", c["name"]], args.quiet) for c in wanted])
     if not ok:
         print("the first capture failed; the cluster is configured, so the cron will retry",
               file=sys.stderr)
         return 1
 
     print("\nanalysing")
-    if not run(["python3", "analyze.py", "--config", str(args.config), "--data", str(args.data),
-                "--customer", args.customer], args.quiet):
+    if not all([run(["python3", "analyze.py", "--config", str(args.config), "--data",
+                     str(args.data), "--cluster", c["name"]], args.quiet) for c in wanted]):
         return 1
 
     print("\nwriting the profile")
     for c in wanted:
-        run(["python3", "profile.py", "--data", str(args.data), "--customer", args.customer,
-             "--cluster", c["name"], "--out", f"profile-{args.customer}-{c['name']}.html"],
-            args.quiet)
+        run(["python3", "profile.py", "--data", str(args.data),
+             "--cluster", c["name"], "--out", f"profile-{c['name']}.html"], args.quiet)
 
     return 0
 

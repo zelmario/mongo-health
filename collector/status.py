@@ -96,7 +96,7 @@ def parse_iso(value: str | None) -> datetime | None:
 def read_clusters(root: Path) -> list[dict]:
     """One record per cluster, from whatever analyze.py left behind."""
     out = []
-    for summary_path in sorted(root.glob("*/*/summary.json")):
+    for summary_path in sorted(root.glob("*/summary.json")):
         base = summary_path.parent
         summary = json.loads(summary_path.read_text())
 
@@ -109,14 +109,13 @@ def read_clusters(root: Path) -> list[dict]:
         out.append(summary)
 
     # A cluster that was configured but never captured has no summary.json at all, and that
-    # absence is exactly what the customer needs to see. Pick those up separately.
-    for state_path in sorted(root.glob("*/*/state.json")):
+    # absence is exactly what needs to be seen. Pick those up separately.
+    for state_path in sorted(root.glob("*/state.json")):
         base = state_path.parent
         if (base / "summary.json").exists():
             continue
         state = json.loads(state_path.read_text())
         out.append({
-            "customer_id": state.get("customer_id", base.parent.name),
             "cluster_id": state.get("cluster_id", base.name),
             "last_capture": state.get("last_capture"),
             "nodes": [],
@@ -326,7 +325,6 @@ body {
   border-bottom: 1px solid var(--edge-soft);
 }
 .name { font-family: var(--mono); font-size: 1rem; font-weight: 600; }
-.owner { color: var(--ink-faint); font-weight: 400; }
 
 .pill {
   display: inline-flex; align-items: center; gap: 0.4rem;
@@ -579,8 +577,7 @@ def render_cluster(cluster: dict, now: datetime) -> str:
     return f"""
     <article class="record" data-state="{state}">
       <div class="record-head">
-        <div class="name">{esc(cluster["cluster_id"])}
-          <span class="owner">/ {esc(cluster["customer_id"])}</span></div>
+        <div class="name">{esc(cluster["cluster_id"])}</div>
         <span class="pill">{esc(label)}</span>
       </div>
       {note_html}
@@ -657,7 +654,7 @@ def main() -> int:
     print(f"{args.out} · {len(clusters)} cluster(s)")
     for c in clusters:
         state, label, _ = assess(c, now)
-        print(f"  {c['customer_id']}/{c['cluster_id']:24} {label:16} "
+        print(f"  {c['cluster_id']:24} {label:16} "
               f"{c.get('days_observed', 0)}d watched, "
               f"{c.get('days_of_raw_ftdc', 0)}d of raw FTDC")
     return 0

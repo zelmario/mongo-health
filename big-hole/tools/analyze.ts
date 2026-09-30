@@ -11,7 +11,7 @@
  *
  *   npx vite-node tools/analyze.ts -- <cluster-dir> [--since ISO] [--daily DIR]
  *
- * `<cluster-dir>` is `data/{customer}/{cluster}/ftdc`, with one subdirectory per node.
+ * `<cluster-dir>` is `data/{cluster}/ftdc`, with one subdirectory per node.
  *
  * `--daily` is what keeps a run's cost flat as the history grows: see `src/data/daily.ts`.
  * With it, a run decodes only the last two days and reads the whole-history percentiles from

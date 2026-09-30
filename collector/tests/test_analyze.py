@@ -63,17 +63,17 @@ def setup(tmp_path: Path) -> dict:
     """
     from state import State
 
-    base = tmp_path / "data/acme/prod"
+    base = tmp_path / "data/prod"
     (base / "ftdc/n0").mkdir(parents=True)
     name = "metrics.2026-08-07T01-00-00Z-00000"
     (base / "ftdc/n0" / name).write_bytes(b"x")
 
-    state = State(customer_id="acme", cluster_id="prod")
+    state = State(cluster_id="prod")
     state.record("n0", name, 1)
     state.last_capture = "2026-08-07T02:00:00+00:00"
     state.save(base / "state.json")
 
-    return {"customer_id": "acme", "cluster_id": "prod", "notify": [], "source": {}}
+    return {"cluster_id": "prod", "notify": [], "source": {}}
 
 
 def stub_engine(monkeypatch, output: dict) -> None:
@@ -90,25 +90,25 @@ def test_same_episode_keeps_the_same_id():
     about the same incident.
     """
     f = a_finding()
-    first = finding_id("acme", "prod", f)
+    first = finding_id("prod", f)
     f["secondsInState"] = 9999
     f["toMs"] = f["toMs"] + 10 * HOUR
-    assert finding_id("acme", "prod", f) == first
+    assert finding_id("prod", f) == first
 
 
 def test_a_later_episode_gets_a_different_id():
-    assert finding_id("acme", "prod", a_finding(worst=T0)) != \
-           finding_id("acme", "prod", a_finding(worst=T0 + 50 * HOUR))
+    assert finding_id("prod", a_finding(worst=T0)) != \
+           finding_id("prod", a_finding(worst=T0 + 50 * HOUR))
 
 
 def test_the_same_episode_on_two_nodes_has_two_ids():
     """Grouping happens at notification time; here they are still distinct observations."""
-    assert finding_id("acme", "prod", a_finding(node="n0")) != \
-           finding_id("acme", "prod", a_finding(node="n1"))
+    assert finding_id("prod", a_finding(node="n0")) != \
+           finding_id("prod", a_finding(node="n1"))
 
 
-def test_customers_never_collide():
-    assert finding_id("acme", "prod", a_finding()) != finding_id("other", "prod", a_finding())
+def test_clusters_never_collide():
+    assert finding_id("prod", a_finding()) != finding_id("staging", a_finding())
 
 
 def test_excursions_are_identified_by_day():
@@ -121,8 +121,8 @@ def test_excursions_are_identified_by_day():
          "worstFromMs": T0, "detected_day": "2026-08-09"}
     same_day = dict(e, worstFromMs=T0 + 5 * HOUR)          # different window, same day
     next_day = dict(e, detected_day="2026-08-10")
-    assert finding_id("a", "p", e) == finding_id("a", "p", same_day)
-    assert finding_id("a", "p", e) != finding_id("a", "p", next_day)
+    assert finding_id("p", e) == finding_id("p", same_day)
+    assert finding_id("p", e) != finding_id("p", next_day)
 
 
 # -------------------------------------------------------------------------- deduplication
@@ -138,7 +138,7 @@ def test_a_reported_finding_is_not_reported_again(tmp_path: Path, monkeypatch):
     assert second["findings_new"] == 0, "the same episode must not be reported twice"
 
     rows = [json.loads(l) for l in
-            (tmp_path / "data/acme/prod/findings.jsonl").read_text().splitlines() if l]
+            (tmp_path / "data/prod/findings.jsonl").read_text().splitlines() if l]
     assert len(rows) == 1, "and it must not be written twice either"
 
 
@@ -166,7 +166,7 @@ def test_baseline_keeps_both_scopes_apart(tmp_path: Path, monkeypatch):
     analyze_cluster(spec, tmp_path / "data", verbose=False)
 
     rows = [json.loads(l) for l in
-            (tmp_path / "data/acme/prod/baseline.jsonl").read_text().splitlines() if l]
+            (tmp_path / "data/prod/baseline.jsonl").read_text().splitlines() if l]
     scopes = {r["scope"] for r in rows}
     assert scopes == {"baseline", "window"}
 
@@ -176,7 +176,7 @@ def test_series_are_written_for_the_report(tmp_path: Path, monkeypatch):
     stub_engine(monkeypatch, engine_output(
         nodes=[node_payload(series={"m1": {"t": [T0], "v": [1.0]}})]))
     analyze_cluster(spec, tmp_path / "data", verbose=False)
-    assert (tmp_path / "data/acme/prod/series.json").exists()
+    assert (tmp_path / "data/prod/series.json").exists()
 
 
 # ------------------------------------------------------- the two numbers shown to the customer
@@ -221,7 +221,7 @@ def test_unresolved_rules_reach_the_summary(tmp_path: Path, monkeypatch):
         unresolved=[{"id": "flow-control-engaged", "metric": "scale(rate(x), 0.1)"}]))
     analyze_cluster(spec, tmp_path / "data", verbose=False)
 
-    summary = json.loads((tmp_path / "data/acme/prod/summary.json").read_text())
+    summary = json.loads((tmp_path / "data/prod/summary.json").read_text())
     assert len(summary["rules_unresolved"]) == 1
     assert summary["rules_evaluated"] == 14
 
@@ -242,7 +242,7 @@ def test_missing_capture_is_an_error_not_a_silent_pass(tmp_path: Path, monkeypat
     stub_engine(monkeypatch, engine_output())
     import pytest
     with pytest.raises(FileNotFoundError):
-        analyze_cluster({"customer_id": "x", "cluster_id": "y"}, tmp_path / "data",
+        analyze_cluster({"cluster_id": "y"}, tmp_path / "data",
                         verbose=False)
 
 
@@ -260,7 +260,7 @@ def test_two_settings_changing_together_are_two_findings():
     cache.update(rule="setting-changed",
                  metric="serverStatus.wiredTiger.cache.maximum bytes configured")
 
-    assert finding_id("acme", "prod", memoria) != finding_id("acme", "prod", cache)
+    assert finding_id("prod", memoria) != finding_id("prod", cache)
 
 
 def test_the_same_setting_changing_twice_a_minute_apart_stays_one_finding():
@@ -270,7 +270,7 @@ def test_the_same_setting_changing_twice_a_minute_apart_stays_one_finding():
     otro = dict(uno)
     otro["worstFromMs"] = T0 + 5_000
 
-    assert finding_id("acme", "prod", uno) == finding_id("acme", "prod", otro)
+    assert finding_id("prod", uno) == finding_id("prod", otro)
 
 
 # ------------------------------------------------------------------ daily summaries, runner
@@ -286,7 +286,7 @@ def test_the_engine_is_given_the_daily_directory(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(analyze, "run_engine", engine)
     analyze_cluster(spec, tmp_path / "data", verbose=False)
-    assert seen["daily"] == tmp_path / "data/acme/prod/daily"
+    assert seen["daily"] == tmp_path / "data/prod/daily"
 
 
 def test_the_status_page_counts_gaps_over_everything_held(tmp_path: Path, monkeypatch):
@@ -296,7 +296,7 @@ def test_the_status_page_counts_gaps_over_everything_held(tmp_path: Path, monkey
     node = dict(node_payload(gaps=recent), gapsHeld={"count": 7, "seconds": 4200})
     stub_engine(monkeypatch, engine_output(nodes=[node]))
     analyze_cluster(spec, tmp_path / "data", verbose=False)
-    summary = json.loads((tmp_path / "data/acme/prod/summary.json").read_text())
+    summary = json.loads((tmp_path / "data/prod/summary.json").read_text())
     assert summary["nodes"][0]["gaps"] == 7
     assert summary["nodes"][0]["seconds_without_data"] == 4200
 

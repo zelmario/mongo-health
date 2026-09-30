@@ -4,7 +4,7 @@
     python3 watchdog.py --config config.json --data data          # report only
     python3 watchdog.py --config config.json --data data --send   # email the alert
 
-A monitoring service that dies quietly is worse than no monitoring service. The customer
+A monitoring service that dies quietly is worse than no monitoring service. Whoever
 believes their cluster is watched, the status page keeps showing the last good run, and the
 silence reads as "nothing is wrong" instead of "nobody is looking". That is the failure this
 guards against, and it is the one failure the collector cannot report about itself.
@@ -39,6 +39,8 @@ from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
 
+import config
+
 
 # The cron runs hourly. One missed run is routine — a slow Atlas job, a long first capture, a
 # run that took the lock and held it — so the threshold is four of them: past any reboot or
@@ -56,10 +58,10 @@ def parse_iso(value: str | None) -> datetime | None:
         return None
 
 
-def roster(data: Path) -> dict[tuple[str, str], dict] | None:
+def roster(data: Path) -> dict[str, dict] | None:
     """Which clusters are supposed to be capturing, as the collector last understood it.
 
-    Keyed by (customer, cluster). A cluster taken out of the config drops off the roster on the
+    Keyed by cluster id. A cluster taken out of the config drops off the roster on the
     next run, so its data can stay on disk without the watchdog alerting about it for ever.
 
     `None` when there is no roster file: older data directories predate it, and absence means
@@ -72,7 +74,7 @@ def roster(data: Path) -> dict[tuple[str, str], dict] | None:
     path = data / "roster.json"
     try:
         entries = json.loads(path.read_text())["clusters"]
-        return {(e["customer_id"], e["cluster_id"]): e for e in entries}
+        return {e["cluster_id"]: e for e in entries}
     except (OSError, json.JSONDecodeError, KeyError, TypeError):
         return None
 
@@ -87,8 +89,8 @@ def check(data: Path, now: datetime, hours: int) -> list[dict]:
     """
     watched = roster(data)
     problems = []
-    for state_path in sorted(data.glob("*/*/state.json")):
-        key = (state_path.parent.parent.name, state_path.parent.name)
+    for state_path in sorted(data.glob("*/state.json")):
+        key = state_path.parent.name
         if watched is not None:
             if key not in watched:
                 # Paused, deleted, or its key was revoked. Its capture stopping is the intended
@@ -99,7 +101,6 @@ def check(data: Path, now: datetime, hours: int) -> list[dict]:
             state = json.loads(state_path.read_text())
         except (json.JSONDecodeError, OSError) as e:
             problems.append({
-                "customer": state_path.parent.parent.name,
                 "cluster": state_path.parent.name,
                 "hours": None,
                 "why": f"state file unreadable: {type(e).__name__}",
@@ -120,7 +121,6 @@ def check(data: Path, now: datetime, hours: int) -> list[dict]:
         if last is None:
             # Configured but never captured. Real, but not the same alarm as one that stopped.
             problems.append({
-                "customer": state.get("customer_id", state_path.parent.parent.name),
                 "cluster": state.get("cluster_id", state_path.parent.name),
                 "hours": None,
                 "why": "never captured",
@@ -142,7 +142,6 @@ def check(data: Path, now: datetime, hours: int) -> list[dict]:
                 why += f" — and capture has not run for {(now - last_run).total_seconds() / 3600:.0f} h" \
                        if last_run else " — and capture has never run"
             problems.append({
-                "customer": state.get("customer_id", state_path.parent.parent.name),
                 "cluster": state.get("cluster_id", state_path.parent.name),
                 "hours": age,
                 # The arrival, not the run. The email quotes this next to "26 hours ago", and
@@ -160,7 +159,7 @@ def check(data: Path, now: datetime, hours: int) -> list[dict]:
 def compose(problems: list[dict], recipients: list[str], sender: str,
             now: datetime) -> EmailMessage:
     worst = problems[0]
-    subject = (f"[collector] {worst['customer']}/{worst['cluster']} has stopped capturing"
+    subject = (f"[collector] {worst['cluster']} has stopped capturing"
                if len(problems) == 1
                else f"[collector] {len(problems)} clusters have stopped capturing")
 
@@ -173,7 +172,7 @@ def compose(problems: list[dict], recipients: list[str], sender: str,
         "",
     ]
     for p in problems:
-        lines.append(f"  {p['customer']}/{p['cluster']} — {p['why']}")
+        lines.append(f"  {p['cluster']} — {p['why']}")
     lines += [
         "",
         "Where to look, in order:",
@@ -265,7 +264,7 @@ def send(msg: EmailMessage, smtp: dict) -> None:
 #
 # It used to go out on every run, which was harmless while the only thing it could report was a
 # collector that had stopped -- rare, and fixed within the hour. Since it also reports a dead
-# SOURCE, an outage can last for days: a customer's replica set that is switched off produces
+# SOURCE, an outage can last for days: a replica set that is switched off produces
 # an identical email every hour until somebody acts, and the fourth one is already being
 # filtered. A day is long enough not to nag and short enough that an ignored outage keeps
 # coming back.
@@ -281,7 +280,7 @@ def _signature(problems: list[dict]) -> list[str]:
     The arrival timestamp is part of it: a cluster that recovered and stopped again is a new
     outage, not the old one still running, and it must not be swallowed as a repeat.
     """
-    return sorted(f"{p['customer']}/{p['cluster']}@{p.get('last_data') or p['why']}"
+    return sorted(f"{p['cluster']}@{p.get('last_data') or p['why']}"
                   for p in problems)
 
 
@@ -308,7 +307,7 @@ def main() -> int:
     ap.add_argument("--data", type=Path, default=Path("data"))
     ap.add_argument("--hours", type=int, default=STALE_AFTER_HOURS)
     ap.add_argument("--to", action="append", default=[],
-                    help="who to alert; defaults to the config's operator address")
+                    help="who to alert; defaults to smtp.operator, then to the config's notify")
     ap.add_argument("--send", action="store_true")
     args = ap.parse_args()
 
@@ -322,8 +321,13 @@ def main() -> int:
 
     problems = check(args.data, now, args.hours)
 
-    cfg = json.loads(args.config.read_text()) if args.config.exists() else {}
-    smtp = cfg.get("smtp") or {}
+    # Read raw and forgiving, not through config.load: a config that no longer validates must
+    # not be what silences the program that reports on everything else being broken.
+    try:
+        cfg = json.loads(args.config.read_text())
+    except (OSError, json.JSONDecodeError):
+        cfg = {}
+    smtp = config.smtp(cfg) or {}
 
     # Deciding and remembering are one step, and two copies of this program can run at once:
     # systemd catches up missed runs, and a machine that was asleep wakes several at a time.
@@ -339,8 +343,7 @@ def main() -> int:
             # paused cluster leaves its data behind, so counting folders would report an all-clear
             # over more clusters than anybody is checking -- reassurance about work not done.
             watched = roster(args.data)
-            on_disk = {(p.parent.parent.name, p.parent.name)
-                       for p in args.data.glob("*/*/state.json")}
+            on_disk = {p.parent.name for p in args.data.glob("*/state.json")}
             total = len(on_disk if watched is None else on_disk & set(watched))
             idle = len(on_disk) - total
             note = f" ({idle} paused or no longer collected)" if idle else ""
@@ -349,15 +352,16 @@ def main() -> int:
 
         print(f"{len(problems)} cluster(s) not capturing:")
         for p in problems:
-            print(f"  {p['customer']}/{p['cluster']} — {p['why']}")
+            print(f"  {p['cluster']} — {p['why']}")
 
         if not args.send:
             print("\nnot sent (pass --send to alert)")
             return 1
 
-        recipients = args.to or ([smtp["operator"]] if smtp.get("operator") else [])
+        recipients = args.to or ([smtp["operator"]] if smtp.get("operator") else
+                                 list(cfg.get("notify") or []))
         if not recipients:
-            print("no recipient: pass --to, or add smtp.operator to the config", file=sys.stderr)
+            print('no recipient: pass --to, or set "notify" in the config', file=sys.stderr)
             return 1
 
         repeat, state = worth_repeating(args.data, problems, now)
