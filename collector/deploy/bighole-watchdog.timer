@@ -1,0 +1,13 @@
+# Hourly, and deliberately out of step with the collector: a watchdog that runs at the same
+# moment as the thing it watches keeps catching it mid-run.
+
+[Unit]
+Description=Big Hole Cloud — watchdog schedule
+
+[Timer]
+OnCalendar=*-*-* *:35:00
+Persistent=true
+Unit=bighole-watchdog.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,262 @@
+/**
+ * From a panel's metric list to the series it draws, across every loaded capture.
+ *
+ * This is where multi-capture actually happens. A panel definition stays host-agnostic --
+ * `rate(serverStatus.opcounters.query)`, written once -- and fans out to one series per loaded
+ * node. Drop three replica-set members in and every panel on the dashboard becomes a
+ * three-node comparison without editing anything, which is the whole point of M4.
+ *
+ * Three rules, in order:
+ *
+ *   1. An expression that names captures explicitly (`c0:…`) is taken at its word. This is how
+ *      cross-host metrics are written, and they must not be fanned out on top.
+ *   2. With one capture loaded, nothing is qualified at all. Keys stay bare paths, so a
+ *      single-capture dashboard, its permalink and its saved layout are byte-identical to what
+ *      M3 produced.
+ *   3. Otherwise fan out over the captures that can actually resolve it. A node missing the
+ *      metric -- a different server version, an arbiter with no WiredTiger -- contributes no
+ *      series rather than an empty one.
+ *
+ * Reads are issued per capture and awaited together. Serialising them would cost a full
+ * round trip per node per panel, and the storage layer is explicit that planning reads and
+ * running them through one Promise.all is what makes a dashboard paint (ARCHITECTURE.md, "Storage").
+ */
+
+import { ExprError, evaluate, exprPaths, parseExpr, unitOf, type Unit } from './expr.js';
+import {
+  alignOnto,
+  capturesOf,
+  planExpr,
+  qualifyPath,
+  splitRef,
+  stripCaptures,
+  type KnownCapture,
+  type SeriesPart,
+} from './qualify.js';
+import type { SeriesQuery } from './reader.js';
+import type { SeriesPayload } from '../workers/protocol.js';
+
+/** What panelData needs to know about a loaded capture. */
+export interface CaptureRef {
+  readonly id: string;
+  /** Hostname, or the folder it came from. Used in the legend. */
+  readonly label: string;
+  /** Every path this capture has, for the degradation check. */
+  readonly paths: ReadonlySet<string>;
+  readonly cadenceMs: number;
+}
+
+export interface SeriesSource {
+  series(captureId: string, expressions: string[], query: SeriesQuery): Promise<SeriesPayload[]>;
+}
+
+/** One drawn series: a panel metric resolved against one capture, or across several. */
+export interface PanelSeries extends SeriesPayload {
+  /** Stable identity for colouring, hiding and the legend. Bare expression, or `c1:expr`. */
+  readonly key: string;
+  /** The panel metric this came from, qualifiers and all. */
+  readonly expression: string;
+  /** The capture it was drawn for, or null for a genuinely cross-host series. */
+  readonly captureId: string | null;
+  /** Empty when there is nothing to disambiguate -- one capture, or a cross-host metric. */
+  readonly captureLabel: string;
+}
+
+export interface PanelData {
+  readonly series: PanelSeries[];
+  /** Per-capture failures, so a panel can say what went wrong instead of drawing nothing. */
+  readonly errors: string[];
+}
+
+/** True when the expression pins any of its paths to a capture. */
+export function isQualified(expression: string, known: KnownCapture): boolean {
+  try {
+    return exprPaths(parseExpr(expression)).some((p) => splitRef(p, known).captureId !== null);
+  } catch {
+    return false;
+  }
+}
+
+/** Unit of a panel metric, ignoring any capture qualifiers. */
+export function unitOfMetric(expression: string, known: KnownCapture): Unit {
+  try {
+    return unitOf(stripCaptures(parseExpr(expression), known));
+  } catch {
+    return 'count';
+  }
+}
+
+/** True when this capture has every path the expression needs. */
+function resolvableIn(expression: string, capture: CaptureRef, known: KnownCapture): boolean {
+  try {
+    return exprPaths(parseExpr(expression)).every((p) => {
+      const ref = splitRef(p, known);
+      // A path pinned to another capture is that capture's problem, not this one's.
+      return ref.captureId !== null && ref.captureId !== capture.id
+        ? true
+        : capture.paths.has(ref.path);
+    });
+  } catch {
+    return false;
+  }
+}
+
+/** The (key, expression, capture) triples a panel's metric list expands to. */
+export function planPanel(
+  metrics: readonly string[],
+  captures: readonly CaptureRef[],
+): Array<{ key: string; expression: string; captureId: string | null; captureLabel: string }> {
+  const ids = new Set(captures.map((c) => c.id));
+  const known: KnownCapture = (id) => ids.has(id);
+  const out: Array<{
+    key: string;
+    expression: string;
+    captureId: string | null;
+    captureLabel: string;
+  }> = [];
+
+  for (const expression of metrics) {
+    if (captures.length === 0) continue;
+
+    if (isQualified(expression, known)) {
+      const used = capturesOf(parseExpr(expression), known, captures[0]!.id);
+      // A cross-host expression belongs to no single node, so it carries no host label.
+      const captureId = used.size === 1 ? ([...used][0] ?? null) : null;
+      out.push({ key: expression, expression, captureId, captureLabel: '' });
+      continue;
+    }
+
+    if (captures.length === 1) {
+      const only = captures[0]!;
+      if (!resolvableIn(expression, only, known)) continue;
+      out.push({ key: expression, expression, captureId: only.id, captureLabel: '' });
+      continue;
+    }
+
+    for (const capture of captures) {
+      if (!resolvableIn(expression, capture, known)) continue;
+      out.push({
+        key: qualifyPath(capture.id, expression),
+        expression,
+        captureId: capture.id,
+        captureLabel: capture.label,
+      });
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Fetch everything a panel draws.
+ *
+ * One request per capture regardless of how many series or how many expressions touch it, so
+ * a 3-node dashboard costs 3 round trips per panel rather than 3 x metrics.
+ */
+export async function fetchPanelData(
+  source: SeriesSource,
+  metrics: readonly string[],
+  captures: readonly CaptureRef[],
+  query: SeriesQuery,
+): Promise<PanelData> {
+  const ids = new Set(captures.map((c) => c.id));
+  const known: KnownCapture = (id) => ids.has(id);
+  const byId = new Map(captures.map((c) => [c.id, c]));
+  const planned = planPanel(metrics, captures);
+
+  // Split each series into single-capture parts, then collect the distinct requests. Two
+  // series over the same node frequently share a subexpression; asking once is free.
+  const requests = new Map<string, Set<string>>();
+  const plans = planned.map((entry) => {
+    const fallback = entry.captureId ?? captures[0]!.id;
+    const plan = planExpr(entry.expression, fallback, known);
+    for (const part of plan.parts) {
+      let set = requests.get(part.captureId);
+      if (set === undefined) {
+        set = new Set();
+        requests.set(part.captureId, set);
+      }
+      set.add(part.expression);
+    }
+    return { entry, plan };
+  });
+
+  const errors: string[] = [];
+  const answers = new Map<string, SeriesPayload>();
+
+  await Promise.all(
+    [...requests].map(async ([captureId, expressions]) => {
+      const list = [...expressions];
+      try {
+        const payloads = await source.series(captureId, list, query);
+        for (let i = 0; i < payloads.length; i++) {
+          answers.set(`${captureId}\u0000${list[i]!}`, payloads[i]!);
+        }
+      } catch (err) {
+        const label = byId.get(captureId)?.label ?? captureId;
+        errors.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }),
+  );
+
+  const answerOf = (part: SeriesPart): SeriesPayload | undefined =>
+    answers.get(`${part.captureId}\u0000${part.expression}`);
+
+  const series: PanelSeries[] = [];
+
+  for (const { entry, plan } of plans) {
+    const parts = plan.parts.map(answerOf);
+    if (parts.some((p) => p === undefined)) continue; // its capture errored
+
+    if (plan.single) {
+      const only = parts[0]!;
+      series.push({ ...only, path: entry.key, ...entry });
+      continue;
+    }
+
+    // Cross-capture: put the parts on one clock and combine. The grid is the densest part, so
+    // the node sampling fastest sets the resolution rather than being thrown away.
+    let gridIdx = 0;
+    for (let i = 1; i < parts.length; i++) {
+      if (parts[i]!.t.length > parts[gridIdx]!.t.length) gridIdx = i;
+    }
+    const grid = parts[gridIdx]!.t;
+
+    const values = new Map<string, Float64Array>();
+    for (let i = 0; i < parts.length; i++) {
+      const part = plan.parts[i]!;
+      const payload = parts[i]!;
+      // Tolerate a few missed samples, not a missing node. Below this a normal cadence
+      // jitter would punch holes in the line; above it a capture that ended early would hold
+      // its last value and fabricate a trend.
+      const cadence = byId.get(part.captureId)?.cadenceMs ?? 1000;
+      const stale = Math.max(cadence * 4, 5000);
+      values.set(
+        part.key,
+        i === gridIdx ? payload.mean : alignOnto(grid, payload.t, payload.mean, stale),
+      );
+    }
+
+    let combined: Float64Array;
+    try {
+      combined = evaluate(plan.combine, grid, values);
+    } catch (err) {
+      errors.push(err instanceof ExprError ? err.message : String(err));
+      continue;
+    }
+
+    series.push({
+      ...entry,
+      path: entry.key,
+      t: grid,
+      // The parts arrive already downsampled, so there is no envelope left to combine --
+      // a diff of two bands is not the band of the diff. Report the line only.
+      min: combined,
+      max: combined,
+      mean: combined,
+      raw: false,
+    });
+  }
+
+  return { series, errors };
+}

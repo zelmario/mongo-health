@@ -1,0 +1,25 @@
+# Every hour. Not for fear of losing data — Atlas keeps FTDC for three to ten days — but
+# because the customer's report is only as fresh as the last run, and this product is sold on
+# explaining the incident that just happened.
+#
+# Hourly rather than six-hourly costs less than it looks. Atlas filters the collection job by
+# the timestamp in the FTDC file NAME, so the file that is still open arrives whole no matter
+# how narrow the window: measured on a real cluster, a one-hour request and a six-hour request
+# returned the same bundle, byte for byte. So the price of a run is the size of the open file,
+# not the length of the gap, and running six times as often costs about 5x the bytes on the
+# wire and nothing at all in storage, because the duplicates are deduplicated on arrival.
+#
+# `Persistent` catches up after the machine was off. Without it, a reboot at the wrong moment
+# means a hole nobody asked for and nobody is told about.
+
+[Unit]
+Description=Big Hole Cloud — collection schedule
+
+[Timer]
+OnCalendar=*-*-* *:05:00
+RandomizedDelaySec=5min
+Persistent=true
+Unit=bighole-collector.service
+
+[Install]
+WantedBy=timers.target

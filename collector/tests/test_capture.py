@@ -1,0 +1,382 @@
+"""Capture: what gets stored, what gets skipped, and what gets said out loud.
+
+Most of this runs against a real `DirectorySource` over real files in a temporary directory,
+rather than against a mock. The dedup logic is the part worth protecting and it does not care
+where the bytes came from, so exercising it through an actual source keeps the tests honest —
+a mock would only prove that the mock behaves as written.
+
+Only the Atlas HTTP calls are faked, because the alternative is a live account and a paid
+cluster in the test suite.
+"""
+from __future__ import annotations
+
+import json
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+import sources  # noqa: E402
+from capture import capture_cluster, load_clusters  # noqa: E402
+from sources import AtlasSource, node_from_path  # noqa: E402
+from state import State  # noqa: E402
+
+NAME = "metrics.2026-08-07T01-15-12Z-00000"
+
+
+def make_source_dir(tmp: Path, files: dict[str, list[tuple[str, int]]]) -> Path:
+    """A directory shaped like an extracted Atlas bundle: <host>/27017/diagnostic.data/…"""
+    root = tmp / "bundle"
+    for node, entries in files.items():
+        d = root / node / "27017" / "diagnostic.data"
+        d.mkdir(parents=True, exist_ok=True)
+        for name, size in entries:
+            (d / name).write_bytes(b"x" * size)
+    return root
+
+
+def spec_for(path: Path) -> dict:
+    return {"customer_id": "acme", "cluster_id": "prod", "notify": [],
+            "source": {"type": "directory", "path": str(path)}}
+
+
+# ------------------------------------------------------------------ which node a file is from
+
+def test_node_from_atlas_layout():
+    """`<host>/27017/diagnostic.data/…` — the port must not be mistaken for the node.
+
+    Getting this wrong collapsed three nodes into one directory called "27017", which is how
+    it was found the first time.
+    """
+    p = Path("/x/atlas-abc-shard-00-01.mongodb.net/27017/diagnostic.data/" + NAME)
+    assert node_from_path(p, "fallback") == "atlas-abc-shard-00-01.mongodb.net"
+
+
+def test_node_from_standalone_layout():
+    """A plain mongod: the directory above diagnostic.data is the node."""
+    p = Path("/var/lib/db1/diagnostic.data/" + NAME)
+    assert node_from_path(p, "fallback") == "db1"
+
+
+def test_node_falls_back_when_the_path_says_nothing():
+    assert node_from_path(Path("/tmp/" + NAME), "fallback") == "fallback"
+
+
+# --------------------------------------------------------------------------- storing files
+
+def test_first_capture_stores_everything(tmp_path: Path):
+    src = make_source_dir(tmp_path, {"n0": [(NAME, 1000), ("metrics.interim", 50)],
+                                     "n1": [(NAME, 1000)]})
+    result = capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
+    assert result["files_new"] == 3
+    assert result["nodes"] == 2
+    stored = sorted(p.name for p in (tmp_path / "data/acme/prod/ftdc").rglob("metrics.*"))
+    assert stored == [NAME, NAME, "metrics.interim"]
+
+
+def test_second_capture_stores_nothing_new(tmp_path: Path):
+    src = make_source_dir(tmp_path, {"n0": [(NAME, 1000)]})
+    capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
+    again = capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
+    assert again["files_new"] == 0
+    assert again["files_skipped"] == 1
+
+
+def test_a_grown_file_is_stored_again(tmp_path: Path):
+    """The whole capture bug, end to end: mongod keeps writing to the file it already gave us."""
+    src = make_source_dir(tmp_path, {"n0": [(NAME, 1000)]})
+    capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
+
+    (src / "n0/27017/diagnostic.data" / NAME).write_bytes(b"x" * 9000)
+    again = capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
+
+    assert again["files_new"] == 1
+    stored = tmp_path / "data/acme/prod/ftdc/n0" / NAME
+    assert stored.stat().st_size == 9000, "the stored copy must be the grown one"
+
+
+def test_a_shrunken_interim_is_stored_again(tmp_path: Path):
+    """It shrinks on every flush, and a grew-only test freezes it in the past."""
+    src = make_source_dir(tmp_path, {"n0": [("metrics.interim", 6000)]})
+    capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
+    (src / "n0/27017/diagnostic.data/metrics.interim").write_bytes(b"x" * 4000)
+    again = capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
+    assert again["files_new"] == 1
+
+
+def test_empty_source_is_reported(tmp_path: Path, capsys):
+    """Returning nothing is not the same as returning nothing new.
+
+    It means a wrong path, revoked credentials or a renamed cluster — and it looks exactly
+    like a healthy quiet run unless somebody says so.
+    """
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    capture_cluster(spec_for(empty), tmp_path / "data", verbose=False)
+    assert "no files at all" in capsys.readouterr().err
+
+
+def test_usage_is_recorded(tmp_path: Path):
+    """Nobody is paying yet, but per-run cost cannot be reconstructed after the fact."""
+    src = make_source_dir(tmp_path, {"n0": [(NAME, 1000)]})
+    capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
+    rows = [json.loads(l) for l in
+            (tmp_path / "data/acme/prod/usage.jsonl").read_text().splitlines() if l]
+    assert rows[0]["operation"] == "capture"
+    assert rows[0]["bytes_new"] == 1000
+
+
+def test_state_survives_between_runs(tmp_path: Path):
+    src = make_source_dir(tmp_path, {"n0": [(NAME, 1000)]})
+    capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
+    state = State.load(tmp_path / "data/acme/prod/state.json", "acme", "prod")
+    assert state.last_capture is not None
+    assert f"n0/{NAME}" in state.files
+
+
+# ------------------------------------------------------------------------------ the config
+
+def test_load_clusters_flattens_customers(tmp_path: Path):
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"customers": [
+        {"id": "a", "notify": ["a@x"], "clusters": [{"id": "c1", "source": {}},
+                                                    {"id": "c2", "source": {}}]},
+        {"id": "b", "notify": [], "clusters": [{"id": "c3", "source": {}}]},
+    ]}))
+    out = load_clusters(cfg)
+    assert [(c["customer_id"], c["cluster_id"]) for c in out] == [
+        ("a", "c1"), ("a", "c2"), ("b", "c3")]
+    assert out[0]["notify"] == ["a@x"]
+
+
+# --------------------------------------------------------------------- the Atlas date filter
+
+class FakeResponse:
+    def __init__(self, payload, headers=None):
+        self.payload = payload
+        self.headers = headers or {}
+
+    def json(self):
+        return self.payload
+
+    def raise_for_status(self):
+        pass
+
+
+def test_atlas_job_asks_for_everything_when_there_is_no_anchor(monkeypatch):
+    """No anchor means a new cluster: pull the whole retention window Atlas is holding.
+
+    This is the onboarding bootstrap, and sending a date filter here would silently start the
+    customer's history at today instead of ten days ago.
+    """
+    sent = {}
+
+    def fake_post(url, **kwargs):
+        sent.update(kwargs["json"])
+        return FakeResponse({"id": "job1"})
+
+    monkeypatch.setattr(sources.requests, "post", fake_post)
+    AtlasSource("g", "rs", "pub", "priv")._create_job(None)
+
+    assert "logCollectionFromDate" not in sent
+    assert sent["logTypes"] == ["FTDC"]
+    assert sent["resourceName"] == "rs"
+
+
+def test_atlas_job_anchors_on_the_file_not_the_clock(monkeypatch):
+    """Atlas filters on the timestamp in the file NAME.
+
+    The caller passes the oldest file that might still be open, and the margin here only
+    absorbs clock skew. A wall-clock offset would exclude the very file the new data is in.
+    """
+    sent = {}
+
+    def fake_post(url, **kwargs):
+        sent.update(kwargs["json"])
+        return FakeResponse({"id": "job1"})
+
+    monkeypatch.setattr(sources.requests, "post", fake_post)
+    anchor = datetime(2026, 8, 7, 1, 15, 12, tzinfo=timezone.utc)
+    AtlasSource("g", "rs", "pub", "priv")._create_job(anchor)
+
+    sent_from = datetime.strptime(sent["logCollectionFromDate"], "%Y-%m-%dT%H:%M:%SZ")
+    assert sent_from <= anchor.replace(tzinfo=None), "must not ask from later than the anchor"
+    assert anchor.replace(tzinfo=None) - sent_from <= timedelta(minutes=10), "margin is small"
+
+
+def test_atlas_end_date_is_in_the_past(monkeypatch):
+    """Atlas rejects a job whose date range reaches into the future."""
+    sent = {}
+
+    def fake_post(url, **kwargs):
+        sent.update(kwargs["json"])
+        return FakeResponse({"id": "job1"})
+
+    monkeypatch.setattr(sources.requests, "post", fake_post)
+    AtlasSource("g", "rs", "pub", "priv")._create_job(
+        datetime(2026, 8, 7, tzinfo=timezone.utc))
+
+    to = datetime.strptime(sent["logCollectionToDate"], "%Y-%m-%dT%H:%M:%SZ")
+    assert to < datetime.utcnow()
+
+
+def test_atlas_reports_a_failed_job(monkeypatch):
+    """A failed job must raise rather than return an empty capture that reads as 'nothing new'."""
+    monkeypatch.setattr(sources.requests, "get",
+                        lambda url, **kw: FakeResponse({"status": "FAILURE"}))
+    with pytest.raises(RuntimeError, match="failed"):
+        AtlasSource("g", "rs", "pub", "priv")._wait("job1")
+
+
+# ------------------------------------------------ a job that outlives the run that ordered it
+
+def test_a_first_capture_waits_longer_than_a_routine_one(monkeypatch):
+    """The two requests are not the same size, so they do not get the same deadline.
+
+    A first capture asks for everything Atlas holds -- days, across every member. Measured on a
+    real M10 that crossed five minutes and returned 366 MB, while a routine run of the same
+    cluster takes seconds.
+    """
+    waited = []
+    monkeypatch.setattr(sources.requests, "post",
+                        lambda url, **kw: FakeResponse({"id": "job1"}))
+    monkeypatch.setattr(AtlasSource, "_wait",
+                        lambda self, job_id, timeout=None: waited.append(timeout))
+    monkeypatch.setattr(AtlasSource, "_download",
+                        lambda self, job_id, target: target.write_bytes(b""))
+    monkeypatch.setattr(sources.tarfile, "open", lambda *a, **kw: _EmptyTar())
+
+    source = AtlasSource("g", "rs", "pub", "priv")
+    list(source.fetch(None))                       # bootstrap
+    list(source.fetch(datetime(2026, 8, 7, tzinfo=timezone.utc)))   # routine
+
+    assert waited == [AtlasSource.BOOTSTRAP_TIMEOUT, AtlasSource.JOB_TIMEOUT]
+
+
+class _EmptyTar:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def extractall(self, *a, **kw):
+        pass
+
+
+def test_a_job_that_outran_the_deadline_is_remembered(monkeypatch, tmp_path):
+    """Atlas finishes the job whether we waited or not, and keeps it downloadable for a month.
+
+    Forgetting the id means the next run orders the same bundle again and pays the same wait --
+    which is how a first capture of a busy cluster can never finish.
+    """
+    monkeypatch.setattr(sources.requests, "post",
+                        lambda url, **kw: FakeResponse({"id": "job7"}))
+    monkeypatch.setattr(sources.requests, "get",
+                        lambda url, **kw: FakeResponse({"status": "IN_PROGRESS"}))
+    # The real deadline is half an hour, and the point being tested is what happens after it,
+    # not how long it is.
+    monkeypatch.setattr(AtlasSource, "BOOTSTRAP_TIMEOUT", 0)
+    monkeypatch.setattr(sources.time, "sleep", lambda s: None)
+
+    spec = {"customer_id": "acme", "cluster_id": "c0",
+            "source": {"type": "atlas", "group_id": "g", "replica_set": "rs",
+                       "public_key": "p", "private_key": "k"}}
+    with pytest.raises(TimeoutError):
+        capture_cluster(spec, tmp_path, verbose=False)
+
+    state = State.load(tmp_path / "acme" / "c0" / "state.json", "acme", "c0")
+    assert state.pending_job == "job7"
+    assert state.last_capture is None, "a run that collected nothing did not capture"
+
+
+def test_the_next_run_collects_the_pending_job_instead_of_ordering_another(monkeypatch,
+                                                                          tmp_path):
+    ordered = []
+    monkeypatch.setattr(sources.requests, "post",
+                        lambda url, **kw: ordered.append(1) or FakeResponse({"id": "new"}))
+    monkeypatch.setattr(sources.requests, "get",
+                        lambda url, **kw: FakeResponse({"status": "SUCCESS"}))
+
+    collected = []
+    monkeypatch.setattr(AtlasSource, "_download",
+                        lambda self, job_id, target: collected.append(job_id))
+    monkeypatch.setattr(sources.tarfile, "open", lambda *a, **kw: _EmptyTar())
+
+    base = tmp_path / "acme" / "c0"
+    base.mkdir(parents=True)
+    state = State(customer_id="acme", cluster_id="c0", pending_job="job7")
+    state.save(base / "state.json")
+
+    spec = {"customer_id": "acme", "cluster_id": "c0",
+            "source": {"type": "atlas", "group_id": "g", "replica_set": "rs",
+                       "public_key": "p", "private_key": "k"}}
+    capture_cluster(spec, tmp_path, verbose=False)
+
+    assert collected == ["job7"], "the bundle already built is the one to download"
+    assert ordered == [], "ordering a second one pays the slow part twice"
+    reloaded = State.load(base / "state.json", "acme", "c0")
+    assert reloaded.pending_job is None, "collected: nothing left pending"
+
+
+def test_a_pending_job_that_died_does_not_wedge_the_cluster(monkeypatch, tmp_path):
+    """An expired or deleted job must be replaced, not retried for ever."""
+    monkeypatch.setattr(sources.requests, "post",
+                        lambda url, **kw: FakeResponse({"id": "fresh"}))
+
+    seen = []
+
+    def fake_get(url, **kw):
+        seen.append(url)
+        # The dead one first, then the replacement.
+        return FakeResponse({"status": "FAILURE" if "job7" in url else "SUCCESS"})
+
+    monkeypatch.setattr(sources.requests, "get", fake_get)
+    collected = []
+    monkeypatch.setattr(AtlasSource, "_download",
+                        lambda self, job_id, target: collected.append(job_id))
+    monkeypatch.setattr(sources.tarfile, "open", lambda *a, **kw: _EmptyTar())
+
+    source = AtlasSource("g", "rs", "pub", "priv", pending_job="job7")
+    list(source.fetch(None))
+
+    assert collected == ["fresh"]
+    assert source.pending_job is None
+
+
+# ------------------------------------------------------- the API this all depends on
+
+def test_a_retirement_announcement_is_said_out_loud(monkeypatch, capsys):
+    """`logCollectionJobs` exists only in the v1.0 API — verified against the v2 spec, where
+    "logCollection" appears in none of its 335 routes and the only log endpoint downloads text
+    logs, not FTDC.
+
+    So the day Atlas retires v1.0, collection stops for every Atlas customer at once, and the
+    usual fallback is not one: polling `getDiagnosticData` needs a database user, which is the
+    thing `docs/api-key.md` promises we never ask for. Nothing here can prevent that. What it
+    can do is make sure we read the announcement instead of discovering the outage.
+    """
+    monkeypatch.setattr(sources.requests, "post",
+                        lambda url, **kw: FakeResponse(
+                            {"id": "job1"},
+                            headers={"sunset": "Wed, 01 Jul 2026 00:00:00 GMT",
+                                     "link": "<https://mongodb.com/notice>; rel=\"deprecation\""}))
+    source = AtlasSource("g", "rs", "pub", "priv")
+    source._create_job(None)
+
+    warned = capsys.readouterr().err
+    assert "RETIREMENT ANNOUNCED" in warned
+    assert "Wed, 01 Jul 2026" in warned
+    assert "no equivalent in v2" in warned
+
+
+def test_a_normal_reply_says_nothing(monkeypatch, capsys):
+    """The quiet path is the one that runs every hour for years; it must stay silent."""
+    monkeypatch.setattr(sources.requests, "post",
+                        lambda url, **kw: FakeResponse({"id": "job1"}))
+    AtlasSource("g", "rs", "pub", "priv")._create_job(None)
+
+    assert capsys.readouterr().err == ""

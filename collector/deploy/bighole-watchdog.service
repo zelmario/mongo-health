@@ -1,0 +1,17 @@
+# The check on the checker. Reads state files and the clock, nothing else — so it still works
+# when the collector does not, which is the entire point.
+
+[Unit]
+Description=Big Hole collector — notice the collector stopped
+
+[Service]
+Type=oneshot
+User=bighole
+Group=bighole
+WorkingDirectory=/srv/bighole/collector
+EnvironmentFile=-/etc/bighole/collector.env
+ExecStart=/usr/bin/python3 watchdog.py --config config.json --data data --send
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/bighole

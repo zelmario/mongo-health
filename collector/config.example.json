@@ -1,0 +1,49 @@
+{
+  "_comment": "Copy to config.json and fill in. Never commit config.json: it holds credentials. retention_days is how long raw FTDC is kept \u2014 it is what the customer pays for. Set it per cluster, per customer, or globally; the most specific wins. smtp.operator is where watchdog.py sends its alerts \u2014 that one goes to you, not to the customer.",
+  "customers": [
+    {
+      "id": "demo",
+      "notify": [
+        "ops@example.com"
+      ],
+      "clusters": [
+        {
+          "id": "bigholedemo",
+          "source": {
+            "type": "atlas",
+            "group_id": "YOUR_ATLAS_PROJECT_ID",
+            "replica_set": "atlas-xxxxxx-shard-0",
+            "public_key": "PUT_IT_HERE",
+            "private_key": "PUT_IT_HERE"
+          }
+        }
+      ],
+      "retention_days": 365
+    },
+    {
+      "id": "example-self-managed",
+      "notify": [
+        "ops@example.com"
+      ],
+      "clusters": [
+        {
+          "id": "rs-production",
+          "source": {
+            "type": "directory",
+            "path": "/mnt/captures/rs-production"
+          }
+        }
+      ],
+      "retention_days": 90
+    }
+  ],
+  "retention_days": 365,
+  "smtp": {
+    "host": "smtp.example.com",
+    "port": 587,
+    "from": "collector@example.com",
+    "user": "\u2026",
+    "password": "\u2026",
+    "operator": "you@example.com"
+  }
+}

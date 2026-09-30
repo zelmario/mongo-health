@@ -1,0 +1,8 @@
+Big Hole collector
+Copyright 2026 Zelmar Michelini
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The big-hole/ directory is Big Hole (https://github.com/zelmario/Big-hole), the FTDC decoder,
+rules engine and viewer the collector runs its analysis in. It is distributed under the MIT
+License; see big-hole/LICENSE.

@@ -1,0 +1,20 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Fixtures are real captures and can be large; regenerate with `npm run fixtures`.
+# The oracle dumps are derived artifacts. Neither belongs in git.
+sample-data/
+tools/oracle/oracle
+tools/oracle/*.jsonl
+
+.DS_Store
+.idea/
+.vscode/
+
+# Playwright browser binaries live in ~/.cache; nothing to ignore here, but the
+# container-written Vite cache sometimes ends up root-owned.
+node_modules/.vite/
+
+# Screenshots from the browser harnesses are artefacts of a run, not source.
+tools/browser/*.png

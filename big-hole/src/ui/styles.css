@@ -1,0 +1,541 @@
+:root {
+  --bg: #14161a; --panel: #1b1e24; --line: #2a2f38;
+  --fg: #e6e9ef; --muted: #8b94a3; --accent: #4f9cf9; --warn: #f2c94c; --err: #eb5757;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg);
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
+.app { display: flex; flex-direction: column; height: 100vh; }
+header { display: flex; align-items: flex-start; gap: 16px; padding: 12px 16px;
+  border-bottom: 1px solid var(--line); background: var(--panel); }
+h1 { font-size: 15px; margin: 0; letter-spacing: .3px; }
+.spacer { flex: 1; }
+.summary { font-size: 13px; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+.warn { color: var(--warn); }
+.error { color: var(--err); margin-top: 12px; }
+.cursor { background: #000; padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+main { flex: 1; display: flex; min-height: 0; }
+main.centered { align-items: center; justify-content: center; }
+.catalog { width: 420px; border-right: 1px solid var(--line); display: flex;
+  flex-direction: column; padding: 12px; gap: 8px; min-height: 0; }
+.search { width: 100%; padding: 8px 10px; background: #0f1115; color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px; font-size: 13px; }
+.metric-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+.metric { display: block; width: 100%; text-align: left; background: transparent;
+  border: 0; border-radius: 6px; padding: 6px 8px; color: var(--fg); cursor: pointer; }
+.metric:hover { background: #232830; }
+.metric.on { background: #1d3350; outline: 1px solid var(--accent); }
+.metric-path { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px; word-break: break-all; }
+.charts { flex: 1; padding: 16px; overflow-y: auto; min-width: 0; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.panel-head { display: flex; gap: 12px; align-items: center; font-size: 12px;
+  color: var(--muted); margin-bottom: 8px; }
+.plot { width: 100%; }
+.pad { padding: 12px; }
+button { background: #262c36; color: var(--fg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 8px 14px; cursor: pointer; font-size: 13px; }
+button:hover { background: #2f3641; }
+button.link { background: none; border: 0; color: var(--accent); padding: 0; }
+.drop { border: 2px dashed var(--line); border-radius: 12px; padding: 48px 64px;
+  text-align: center; max-width: 640px; }
+.drop.hover { border-color: var(--accent); background: #1a2431; }
+.drop h2 { margin: 0 0 8px; font-size: 18px; }
+.bar { height: 6px; background: #0f1115; border-radius: 3px; overflow: hidden; margin: 16px 0 8px; }
+.bar-fill { height: 100%; background: var(--accent); transition: width .2s; }
+.u-legend { font-size: 11px !important; }
+
+/* ---- M3: panel grid ---- */
+.grid-host { width: 100%; }
+.react-grid-item { transition: none; }
+.react-grid-item.react-grid-placeholder { background: var(--accent); opacity: .18; border-radius: 8px; }
+.react-grid-item > .panel { height: 100%; display: flex; flex-direction: column; }
+.panel.focused { outline: 1px solid var(--accent); }
+.drag-handle { cursor: grab; user-select: none; }
+.drag-handle:active { cursor: grabbing; }
+.panel-title { background: transparent; border: 0; color: var(--fg); font-size: 13px;
+  font-weight: 600; padding: 2px 4px; border-radius: 4px; min-width: 40px; flex: 0 1 auto; }
+.panel-title:hover, .panel-title:focus { background: #0f1115; outline: 1px solid var(--line); }
+.dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; }
+.panel .plot { flex: 1; min-height: 0; }
+.catalog-target { padding: 2px 2px 0; }
+.toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+  background: #0f1115; border: 1px solid var(--accent); color: var(--fg);
+  padding: 8px 16px; border-radius: 6px; font-size: 13px; z-index: 50; }
+header button { flex-shrink: 0; }
+
+/* ---- ported dashboard: sections, legend values ---- */
+.section { display: flex; align-items: center; height: 100%; padding: 0 4px;
+  border-bottom: 1px solid var(--line); }
+.section h2 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--muted); }
+.panel-head { margin-bottom: 4px; }
+.catalog { width: 380px; }
+
+/* ---- legend at the foot of each panel (Grafana layout) ---- */
+/* --legend-rows is the FLOOR, not the cap: see below. --legend-col is the narrowest a legend
+   column may get before the legend drops back to one column. */
+:root { --legend-row: 18px; --legend-rows: 2; --legend-col: 200px; }
+
+.panel { display: flex; flex-direction: column; }
+/* The plot takes whatever the legend leaves. */
+.panel .plot { flex: 1 1 auto; min-height: 72px; }
+
+/* Columns, not one series per row.
+ *
+ * One full-width row per series is fine for the one- or two-node case this was written for and
+ * falls apart at eight: a metric fanned out across a nine-member replica set became nine rows
+ * in a two-row box, so reading the legend meant scrolling a 36px-tall window -- reported from a
+ * real ticket. A legend entry is short ("node6 queues.execution.read.available 12") and a panel
+ * the width was there all along; auto-fill spends it. `1fr` columns keep the values aligned
+ * down the panel, which a wrapping flex row would not.
+ *
+ * The height cap is now proportional with a two-row floor, rather than a flat two rows. The
+ * flat cap existed to keep tiled panels the same shape, and that still holds -- a fraction of
+ * the panel is the same shape for every panel -- but it no longer means a tall panel wastes
+ * the room it has. It is a cap, not a size: a two-series panel is still two rows tall.
+ *
+ * 30%, not more, and deliberately modest: the columns are what made nine nodes readable (three
+ * per row means three times the entries in the same strip), so buying further rows with chart
+ * height is a bad trade -- at 38% a tiled panel's plot was squeezed to a single y tick.
+ */
+.legend { flex: 0 1 auto; display: grid; align-content: start;
+  grid-template-columns: repeat(auto-fill, minmax(var(--legend-col), 1fr));
+  column-gap: 14px; row-gap: 0;
+  max-height: max(calc(var(--legend-row) * var(--legend-rows) + 6px), 30%);
+  overflow-y: auto; overflow-x: hidden;
+  padding: 5px 2px 0; margin-top: 4px; border-top: 1px solid var(--line); }
+
+.legend-item { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0;
+  height: var(--legend-row); flex: 0 0 auto; background: none; border: 0; padding: 0 3px;
+  cursor: pointer; font-size: 11px; line-height: var(--legend-row); color: var(--fg);
+  border-radius: 3px; text-align: left; }
+.legend-item:hover { background: #232830; }
+.legend-item.off .legend-label { color: var(--muted); text-decoration: line-through; }
+.legend-dash { width: 12px; height: 2px; border-radius: 1px; flex: 0 0 auto; }
+/* min-width:0 is what lets the ellipsis engage inside a flex item. */
+.legend-label { flex: 1 1 auto; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.legend-value { flex: 0 0 auto; color: var(--fg); font-weight: 600; margin-left: 8px;
+  font-variant-numeric: tabular-nums; }
+
+/* Thin scrollbar, so the rows it sits beside stay the width they were measured at. */
+.legend::-webkit-scrollbar { width: 8px; }
+.legend::-webkit-scrollbar-thumb { background: #39404c; border-radius: 4px; }
+.legend::-webkit-scrollbar-track { background: transparent; }
+.legend { scrollbar-width: thin; scrollbar-color: #39404c transparent; }
+
+/* ---- time range picker ---- */
+.timerange { position: relative; display: flex; align-items: center; gap: 2px; }
+.tr-main { background: #262c36; border: 1px solid var(--line); color: var(--fg);
+  padding: 6px 10px; border-radius: 6px; font-size: 12px; cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: nowrap; }
+.tr-btn { background: #262c36; border: 1px solid var(--line); color: var(--fg);
+  padding: 6px 9px; border-radius: 6px; font-size: 13px; line-height: 1; cursor: pointer; }
+.tr-btn:hover, .tr-main:hover { background: #2f3641; }
+.tr-menu { position: absolute; top: 110%; right: 0; z-index: 60; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px; min-width: 260px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.55); }
+.tr-menu-head { padding: 2px 6px 8px; border-bottom: 1px solid var(--line); margin-bottom: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.tr-preset { display: block; width: 100%; text-align: left; background: none; border: 0;
+  color: var(--fg); padding: 6px 8px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.tr-preset:hover { background: #2f3641; }
+.band-toggle { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+header { align-items: center; flex-wrap: wrap; }
+.panel-title { font-size: 12px; }
+
+/* ---- dashboard menu ---- */
+.dashmenu { position: relative; display: flex; align-items: center; gap: 8px; }
+.dash-current { background: #262c36; border: 1px solid var(--line); color: var(--fg);
+  padding: 6px 10px; border-radius: 6px; font-size: 12px; cursor: pointer;
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dash-current:hover { background: #2f3641; }
+.dirty { color: var(--warn); margin-left: 6px; font-size: 16px; line-height: 0; }
+.dash-scrim { position: fixed; inset: 0; z-index: 55; }
+.dash-menu { position: absolute; top: 110%; left: 0; z-index: 60; background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px; min-width: 320px;
+  box-shadow: 0 8px 28px rgba(0,0,0,.55); }
+.dash-actions { display: flex; gap: 6px; margin-bottom: 6px; }
+.dash-actions button { flex: 1; padding: 6px 8px; font-size: 12px; }
+.dash-actions button:disabled { opacity: .4; cursor: default; }
+.dash-list-head { padding: 8px 4px 4px; border-top: 1px solid var(--line); margin-top: 4px; }
+.dash-list { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; }
+.dash-row { display: flex; align-items: center; gap: 4px; border-radius: 4px; }
+.dash-row:hover { background: #232830; }
+.dash-row.on { outline: 1px solid var(--accent); }
+.dash-open { flex: 1; display: flex; justify-content: space-between; align-items: center;
+  gap: 10px; background: none; border: 0; color: var(--fg); text-align: left;
+  padding: 7px 8px; cursor: pointer; font-size: 13px; min-width: 0; }
+.dash-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.link.danger { color: var(--err); }
+
+/* ---- zoom selection ---- */
+/* uPlot's default is rgba(0,0,0,0.07), invisible on a dark theme. */
+.u-select {
+  background: rgba(79, 156, 249, 0.16);
+  border-left: 1px solid var(--accent);
+  border-right: 1px solid var(--accent);
+}
+.u-select-label {
+  position: absolute; top: 4px; transform: translateX(-50%);
+  background: var(--accent); color: #08111c; font-size: 11px; font-weight: 600;
+  padding: 1px 6px; border-radius: 3px; pointer-events: none; white-space: nowrap; z-index: 10;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- collapsible catalog ---- */
+.catalog { flex: 0 0 380px; }
+
+/* ---- left rail: catalog + its toggle ---- */
+/* The width belongs to the rail, not to whatever is inside it. It used to come from .catalog,
+   so switching the tab to the event list left the rail unconstrained and a long log message
+   pushed the charts off screen. */
+.sidebar { display: flex; flex-direction: column; min-height: 0; min-width: 0;
+  flex: 0 0 380px; }
+/* Collapsed there is no resizer, so the sidebar carries the divider itself. */
+.sidebar.collapsed { flex: 0 0 auto; border-right: 1px solid var(--line); }
+/* Drag handle on the sidebar's right edge -- it also *is* the divider when expanded, so the
+   line and the grab surface are the same 5px and never double up. */
+.sidebar-resizer { flex: 0 0 5px; cursor: col-resize; border-left: 1px solid var(--line);
+  background: transparent; transition: background .12s; }
+.sidebar-resizer:hover, .sidebar-resizer:active { background: var(--accent); }
+.catalog-toggle { margin: 8px 8px 0; background: #262c36; border: 1px solid var(--line);
+  color: var(--fg); border-radius: 6px; padding: 6px 10px; font-size: 12px; cursor: pointer;
+  white-space: nowrap; align-self: flex-start; }
+.catalog-toggle:hover { background: #2f3641; }
+.catalog { border-right: 0; }
+
+/* The bundled handle art is a dark glyph on a light theme; invert it and make it findable. */
+.react-grid-item > .react-resizable-handle { opacity: 0; transition: opacity .12s; }
+.react-grid-item:hover > .react-resizable-handle { opacity: .85; filter: invert(1); }
+.react-grid-item.react-draggable-dragging { z-index: 30; }
+.react-grid-item.resizing { z-index: 30; opacity: .9; }
+
+/* Title is a span until double-clicked, so the whole header stays a drag surface. */
+.panel-title-text { font-size: 12px; font-weight: 600; padding: 2px 4px; border-radius: 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: grab; }
+.panel-title-text:hover { background: #0f1115; }
+
+/* ---- M4: multiple captures ---- */
+.capture-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.capture-chip { display: flex; align-items: center; gap: 6px; padding: 2px 6px;
+  border: 1px solid var(--line); border-radius: 6px; background: #1b1f26; }
+.capture-chip.active { border-color: var(--accent); }
+/* Hidden, not unloaded: the bytes stay in OPFS so ticking it back on is instant. */
+.capture-chip.off { opacity: .5; }
+.capture-name { background: none; border: 0; color: var(--fg); font-size: 12px;
+  cursor: pointer; padding: 2px 0; text-align: left; }
+.badge { background: var(--accent); color: #0b0d10; border-radius: 3px; font-size: 10px;
+  font-weight: 700; padding: 0 4px; margin-left: 4px; }
+.capture-select { width: 100%; background: #1b1f26; color: var(--fg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; font-size: 12px; }
+/* Which node a series came from has to be readable before the metric name is. */
+.legend-host { color: var(--accent); margin-right: 6px; font-weight: 600; }
+.cross-host { cursor: help; }
+.node-progress { margin-bottom: 10px; }
+.node-progress .bar { margin: 4px 0; }
+.pad { padding: 6px 16px; }
+
+/* ---- maximized panel ---- */
+/* Outside the grid: react-grid-layout sizes rows in fixed 30px units and cannot express
+   "fill the viewport", so the panel measures itself instead. */
+.maximized-host { height: 100%; }
+.maximized-host > .panel { height: 100%; }
+/* With the whole viewport to work with, show more of the legend before it scrolls -- the cap
+   exists to keep tiled panels the same shape, which no longer applies. Wide, too, so the
+   columns get narrower and more of them fit: this is where a nine-node fan-out is read. */
+.maximized-host .legend { max-height: 40%; --legend-col: 170px; }
+
+/* ---- previously ingested captures ---- */
+.recent { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 12px;
+  text-align: left; max-width: 640px; }
+.recent-head { display: flex; align-items: center; justify-content: space-between; }
+.recent ul { list-style: none; margin: 6px 0 0; padding: 0; }
+.recent li { display: flex; align-items: center; gap: 8px; }
+.recent-open { flex: 1; text-align: left; background: none; border: 0; color: var(--fg);
+  padding: 6px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.recent-open:hover { background: #232830; }
+/* A start-up failure has to be readable, so the stack is not hidden behind a console. */
+.fatal-stack { white-space: pre-wrap; text-align: left; max-width: 700px; margin: 8px auto;
+  opacity: .75; }
+
+/* ---- M5: log events ---- */
+.sidebar-tabs { display: flex; gap: 4px; padding: 8px 8px 0; }
+.tab { background: none; border: 0; border-bottom: 2px solid transparent; color: var(--muted);
+  font-size: 12px; padding: 4px 8px; cursor: pointer; }
+.tab.on { color: var(--fg); border-bottom-color: var(--accent); }
+.events { display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 1;
+  padding: 8px; gap: 8px; }
+.events.empty { padding: 16px; line-height: 1.5; }
+.events-head { display: flex; gap: 6px; min-width: 0; }
+.events-head .search { min-width: 0; flex: 1 1 auto; }
+.events-head select { background: #1b1f26; color: var(--fg); border: 1px solid var(--line);
+  border-radius: 6px; font-size: 12px; }
+.events ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+.event { display: flex; gap: 8px; width: 100%; text-align: left; background: none; border: 0;
+  color: var(--fg); font-size: 11px; padding: 3px 4px; border-radius: 4px; cursor: pointer;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; align-items: baseline; }
+.event:hover { background: #232830; }
+.event-time { flex: 0 0 auto; color: var(--muted); }
+.event-host { flex: 0 0 auto; color: var(--accent); }
+.event-label { flex: 0 0 auto; font-weight: 600; }
+/* The detail is the part that varies; let it take what is left and ellipsize. */
+.event-msg { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.event.sev-warn .event-label { color: var(--warn); }
+.event.sev-error .event-label { color: var(--err); }
+/* Log-derived metrics sit in the same catalogue as decoded ones; the badge says which. */
+.from-log { background: #2a3550; color: #8ab8ff; border-radius: 3px; font-size: 9px;
+  padding: 0 4px; margin-right: 6px; text-transform: uppercase; letter-spacing: .04em; }
+/* Raw log lines, read on demand when an event is opened. */
+.event-lines { margin: 2px 0 8px 8px; border-left: 2px solid var(--line); padding-left: 8px;
+  max-height: 260px; overflow: auto; }
+.raw { display: flex; gap: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px; line-height: 1.45; padding: 1px 0; }
+.raw-time { flex: 0 0 auto; color: var(--muted); }
+.raw-comp { flex: 0 0 52px; }
+.raw-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.raw.sev-warn .raw-time { color: var(--warn); }
+.raw.sev-error .raw-time { color: var(--err); }
+
+/* ---- M5: the log viewer ---- */
+.logview { display: flex; flex-direction: column; min-height: 0; min-width: 0; flex: 1;
+  padding: 8px; gap: 6px; }
+.logview.empty { padding: 16px; line-height: 1.55; }
+.logview-head { display: flex; gap: 6px 8px; align-items: center; min-width: 0; flex-wrap: wrap; }
+.logview-head .search { min-width: 0; flex: 1 1 auto; }
+/* An active toggle (e.g. "● following") reads as engaged, not as a plain link. */
+.logview-head .link.on { color: var(--accent); font-weight: 600; }
+.logview-note { display: flex; gap: 8px; align-items: center; }
+.logview-lines { flex: 1; overflow: auto; min-height: 0; font-family: ui-monospace,
+  SFMono-Regular, Menlo, monospace; }
+.logline { display: flex; gap: 6px; align-items: baseline; font-size: 10px; line-height: 1.5;
+  padding: 1px 4px; border-left: 2px solid transparent; cursor: pointer; white-space: nowrap;
+  /* Render only the rows on screen. Thousands of lines then cost what a screenful does -- the
+     browser skips layout and paint for the rest, and `auto` remembers each row's real size so
+     the scrollbar and the follow-mode scroll maths stay accurate. */
+  content-visibility: auto; contain-intrinsic-size: auto 400px auto 17px; }
+.logline:hover { background: #232830; }
+/* A notable line -- the ones that used to be the "events" -- stands out of the stream. */
+.logline.important { border-left-color: #8ab8ff; background: rgba(138,184,255,.05); }
+.logline.important.sev-warn { border-left-color: var(--warn); }
+.logline.important.sev-error { border-left-color: var(--err); }
+.logline.pinned { background: rgba(242,204,12,.12); border-left-color: #f2cc0c; }
+.logline-time { flex: 0 0 auto; color: var(--muted); }
+.logline-host { flex: 0 0 auto; color: var(--accent); }
+.logline-comp { flex: 0 0 46px; }
+.logline-badge { flex: 0 0 auto; background: #2a3550; color: #8ab8ff; border-radius: 3px;
+  font-size: 9px; padding: 0 4px; text-transform: uppercase; letter-spacing: .04em; }
+.logline.sev-warn .logline-badge { background: #3a2f1a; color: var(--warn); }
+.logline.sev-error .logline-badge { background: #3a1f22; color: var(--err); }
+/* Its natural width, not the leftover space: a long line runs past the pane and the list
+   scrolls sideways to it, rather than being clipped with an ellipsis. */
+.logline-msg { flex: 0 0 auto; }
+.logline.sev-warn .logline-time { color: var(--warn); }
+.logline.sev-error .logline-time { color: var(--err); }
+.tab-pins { color: #f2cc0c; }
+
+/* ---- M5: log viewer — parse bar, reveal, sideways scroll ---- */
+/* Each line keeps its full width and does not wrap; the list (overflow:auto) scrolls
+   horizontally to read a long JSON command doc, the way `less -S` chops long lines. min-width
+   100% keeps a short line full-bleed so the hover/selection/notable highlight spans the pane. */
+.logline { flex-direction: column; align-items: stretch; width: max-content; min-width: 100%; }
+.logline-row { display: flex; gap: 6px; align-items: baseline; }
+/* Flash the line a chart double-click scrolled to. */
+.logline.flash { animation: logflash 1.6s ease-out; }
+@keyframes logflash {
+  0%, 30% { background: rgba(242,204,12,.28); }
+  100% { background: transparent; }
+}
+.logview-parsing { display: flex; flex-direction: column; gap: 3px; padding: 2px 0; }
+/* Progress made, not a percentage: the scan's total is unknown until it finishes. */
+.bar.indeterminate { position: relative; overflow: hidden; }
+.bar.indeterminate .bar-fill { position: absolute; width: 40%; left: -40%;
+  animation: barslide 1.1s ease-in-out infinite; }
+@keyframes barslide { to { left: 100%; } }
+.tab-loading { color: #8ab8ff; animation: pulse 1s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+
+/* ---- help overlay ---- */
+.help-btn { width: 26px; height: 26px; flex: 0 0 auto; border-radius: 50%; margin-left: 8px;
+  background: #262c36; border: 1px solid var(--line); color: var(--fg); cursor: pointer;
+  font-weight: 700; font-size: 13px; line-height: 1; }
+.help-btn:hover { background: #2f3641; border-color: var(--accent); }
+/* Above the log window (z 60) -- help can be opened from anywhere, including over it. */
+.help-scrim { position: fixed; inset: 0; z-index: 70; background: rgba(0,0,0,.6);
+  display: flex; padding: 4vh 3vw; }
+.help { display: flex; flex-direction: column; flex: 1; min-height: 0; max-width: 780px;
+  margin: 0 auto; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 20px 60px rgba(0,0,0,.5); overflow: hidden; }
+.help-bar { display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+  border-bottom: 1px solid var(--line); }
+.help-title { font-weight: 600; font-size: 14px; }
+.help-body { overflow: auto; padding: 4px 20px 20px; line-height: 1.55; }
+.help-lede { font-size: 14px; margin: 14px 0 4px; }
+.help-body section { border-top: 1px solid var(--line); padding-top: 4px; margin-top: 14px; }
+.help-body h3 { font-size: 13px; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--accent); margin: 12px 0 6px; }
+.help-body ul { margin: 0; padding-left: 18px; }
+.help-body li { margin: 5px 0; }
+.help-body code { background: #0f1115; border: 1px solid var(--line); border-radius: 4px;
+  padding: 0 4px; font-size: 12px; }
+.kbd { display: inline-block; background: #1b1f26; border: 1px solid var(--line);
+  border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; font-family: ui-monospace,
+  SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.5; color: var(--fg); }
+.help-keys { border-collapse: collapse; margin: 4px 0; }
+.help-keys td { padding: 4px 14px 4px 0; vertical-align: top; }
+.help-keys td:first-child { white-space: nowrap; }
+.help-foot { margin: 18px 0 2px; }
+
+/* ---- full-screen log window: a `less` for the mongod log ---- */
+/* The sidebar strip is too narrow to read the log; this is the room to read it in. Above the
+   maximised panel's z-index (30) so it covers everything, dimming the dashboard behind it. */
+.logwindow-scrim { position: fixed; inset: 0; z-index: 60; background: rgba(0,0,0,.55);
+  display: flex; padding: 3vh 3vw; }
+.logwindow { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0;
+  max-width: 1600px; margin: 0 auto; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; box-shadow: 0 20px 60px rgba(0,0,0,.5); overflow: hidden; }
+.logwindow-bar { display: flex; align-items: center; gap: 12px; padding: 8px 12px;
+  border-bottom: 1px solid var(--line); }
+.logwindow-title { font-weight: 600; font-size: 13px; }
+.logwindow-keys { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* Roomier than the cramped sidebar -- the whole reason the window exists. */
+.logwindow .logview { padding: 4px 10px 10px; }
+.logwindow .logline { font-size: 12px; line-height: 1.6;
+  /* Taller rows in the window; a matching intrinsic height keeps the skipped-row estimate close. */
+  contain-intrinsic-size: auto 900px auto 21px; }
+.logwindow .logline-comp { flex-basis: 90px; }
+/* The keyboard-selected row: a steady highlight distinct from hover and from the flash.
+   (The sideways-scroll behaviour is now the log's default -- see `.logline` above -- so the
+   window only adds its bigger type and the selection highlight.) */
+.logwindow .logline.sel { background: #2b3444; border-left-color: #8ab8ff; }
+
+/* --- M6 checks -------------------------------------------------------------
+   A finding is a lead, not an alarm: everything it says is printed, because a
+   line you have to click to understand is one you learn to ignore. The whole
+   row is the click target, and it zooms the dashboard to the episode. */
+.insights { display: flex; flex-direction: column; min-height: 0; }
+.findings { overflow: auto; padding: 0 8px 8px; }
+
+.finding {
+  border: 1px solid #232833; border-left-width: 3px; border-radius: 6px;
+  padding: 7px 9px; margin-bottom: 8px; cursor: pointer; background: #12151b;
+}
+.finding:hover { background: #171b23; border-color: #2f3644; }
+.finding.sev-critical { border-left-color: var(--err); }
+.finding.sev-warning  { border-left-color: var(--warn); }
+.finding.sev-info     { border-left-color: var(--accent); }
+
+.finding-head { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.finding-dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.finding-dot.sev-critical { background: var(--err); }
+.finding-dot.sev-warning  { background: var(--warn); }
+.finding-dot.sev-info     { background: var(--accent); }
+.finding-host {
+  margin-left: auto; font-size: 11px; color: var(--muted);
+  border: 1px solid #2a2f38; border-radius: 4px; padding: 0 5px;
+}
+
+.finding-when { margin-bottom: 4px; }
+.finding-what { margin-bottom: 3px; }
+.finding-check { margin-bottom: 3px; }
+/* The resolved expression, so a finding can be checked against the chart it
+   came from -- and so a rename that made it resolve elsewhere is visible. */
+.finding-metric { font-family: ui-monospace, monospace; font-size: 10px; opacity: .55; word-break: break-all; }
+
+.tab-bad  { color: var(--err); font-weight: 700; }
+.tab-warn { color: var(--warn); font-weight: 700; }
+
+/* ---- M6: explain this window ---- */
+/* A row is a button, not a card: the whole point is that clicking it puts the metric on a
+   chart, so it has to read as something you press. Two lines -- what moved, and the two
+   numbers being compared -- because a ranked list you cannot sanity-check is an oracle. */
+.explain-heading { color: var(--muted); text-transform: lowercase; letter-spacing: .04em;
+  padding: 6px 9px 2px; }
+.explain-events { padding: 0 8px; }
+.change { display: block; width: 100%; text-align: left; cursor: pointer;
+  border: 1px solid #232833; border-radius: 6px; padding: 5px 8px; margin-bottom: 5px;
+  background: #12151b; color: var(--fg); font-size: 12px; }
+.change:hover { background: #171b23; border-color: #2f3644; }
+.change-event { border-left: 3px solid #8ab8ff; }
+.change-head { display: flex; align-items: baseline; gap: 6px; }
+.change-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Inside a change row the host chip leads the line rather than floating right; the ratio is
+   what belongs on the right, because that is the column the eye scans down. */
+.change-head .finding-host { margin-left: 0; flex: none; }
+.change-up { color: var(--warn); font-variant-numeric: tabular-nums; }
+.change-down { color: var(--accent); font-variant-numeric: tabular-nums; }
+.change-values { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* ---- member-state strip ----
+   Bands, not a chart. A dozen discrete codes have nothing to interpolate and no y scale to
+   share, and as DOM each run gets a label, a tooltip and click-to-zoom for nothing. Sticky, so
+   the frame the charts are read inside stays on screen while the dashboard scrolls. */
+.states { position: sticky; top: -16px; z-index: 20; margin: -16px -16px 12px;
+  padding: 8px 16px 6px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.states-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 5px; }
+.states-row { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+/* Fixed, so every row's bands start at the same x and the columns can be read down. */
+.states-name { flex: 0 0 150px; font-size: 11px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; text-align: right; cursor: help; }
+/* A peer's heartbeat view is second-hand evidence and has to look like it. */
+.states-name.peer { opacity: .65; font-style: italic; }
+/* The track's own background IS the "no data" colour, so a member whose capture is shorter
+   than the bundle simply has nothing drawn there rather than needing a run to say so. */
+.states-track { position: relative; flex: 1; height: 20px; min-width: 0;
+  background: repeating-linear-gradient(45deg, #1f232b 0 6px, #191d24 6px 12px);
+  border-radius: 3px; overflow: hidden; }
+.states-run { position: absolute; top: 0; height: 100%; border: 0; padding: 0;
+  border-radius: 0; cursor: pointer; overflow: hidden; display: flex;
+  align-items: center; justify-content: flex-end; }
+.states-run:hover { filter: brightness(1.15); }
+.states-run.nodata { background: transparent; cursor: default; }
+.states-run-label { font-size: 10px; font-weight: 700; letter-spacing: .04em;
+  color: #0b0d10; padding: 0 5px; white-space: nowrap; }
+.states-run.nodata .states-run-label { color: var(--muted); font-weight: 400; }
+/* Many members: the strip is sticky, so whatever height it takes it takes for good. Nine
+   members at the roomy row height claim a quarter of the chart area permanently. */
+.states-rows { max-height: 40vh; overflow-y: auto; }
+.states.dense .states-track { height: 14px; }
+.states.dense .states-row { margin-bottom: 2px; }
+.states.dense .states-name { font-size: 10px; flex-basis: 130px; }
+.states.dense .states-run-label { font-size: 9px; padding: 0 4px; }
+.states-axis { margin-top: 1px; position: sticky; bottom: 0; background: var(--panel); }
+.states-axis .states-track { background: none; height: 14px; overflow: visible; }
+/* Centred on the tick, and clipped by the row rather than widening the strip. */
+.states-tick { position: absolute; top: 0; transform: translateX(-50%); font-size: 10px;
+  color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.states-tz { position: absolute; right: 0; top: 0; font-size: 10px; }
+
+/* ---- node info page ----
+   A field per row and a node per column: the question is "why is this member different", which
+   is a question about a row. Reuses the log window's scrim and frame -- same kind of object. */
+.infopage { max-width: 1400px; margin: 0 auto; }
+.info-body { overflow: auto; padding: 8px 16px 20px; }
+.info-table { border-collapse: collapse; width: 100%; font-size: 12px; }
+.info-table th, .info-table td { padding: 4px 10px; text-align: left; vertical-align: top;
+  border-bottom: 1px solid #21252d; }
+.info-table thead th { position: sticky; top: 0; background: var(--panel); z-index: 1;
+  border-bottom: 1px solid var(--line); font-size: 12px; }
+/* The label column is a header cell, so it carries the source path as its tooltip. */
+.info-table tbody th { font-weight: 400; color: var(--muted); white-space: nowrap;
+  cursor: help; width: 1%; }
+.info-table td { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  word-break: break-word; }
+.info-section th { padding-top: 14px; color: var(--fg); font-size: 11px; font-weight: 600;
+  letter-spacing: .08em; text-transform: uppercase; border-bottom: 1px solid var(--line); }
+/* Marked, not hidden: on a nine-member bundle the disagreeing row is the whole finding. */
+.info-differs td { color: var(--warn); }
+.info-flag { color: var(--warn); margin-left: 6px; font-weight: 700; cursor: help; }
+.info-raw { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 10px; }
+.info-raw-tabs { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.info-raw-tabs .tab:disabled { opacity: .4; cursor: default; }
+.info-json { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  line-height: 1.45; background: #0f1115; border: 1px solid var(--line); border-radius: 6px;
+  padding: 10px; margin-top: 8px; max-height: 60vh; overflow: auto; white-space: pre; }

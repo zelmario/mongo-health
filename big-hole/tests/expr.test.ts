@@ -1,0 +1,282 @@
+/**
+ * Expression layer.
+ *
+ * Two properties matter most here and both come from real capture data rather than from
+ * theory: metric paths contain parentheses, and some end in a space. Either one silently
+ * breaks a naive parser, and the symptom is "that metric doesn't exist" rather than a crash.
+ */
+
+import { describe, expect, it } from 'vitest';
+
+import {
+  ExprError,
+  evaluate,
+  exprPaths,
+  exprToString,
+  parseExpr,
+  unitOf,
+} from '../src/data/expr.js';
+import {
+  applyRolePrefix,
+  defaultDashboard,
+  detectRolePrefixes,
+  expandMetric,
+} from '../src/dashboard/layout.js';
+
+const t = Float64Array.from([0, 1000, 2000, 3000]); // 1 Hz
+
+function raw(entries: Record<string, number[]>): Map<string, Float64Array> {
+  return new Map(Object.entries(entries).map(([k, v]) => [k, Float64Array.from(v)]));
+}
+
+describe('parsing', () => {
+  it('treats a bare path as a raw metric', () => {
+    expect(parseExpr('serverStatus.mem.resident')).toEqual({
+      fn: 'raw',
+      path: 'serverStatus.mem.resident',
+    });
+  });
+
+  it('keeps parentheses that belong to the metric name', () => {
+    // 80 real paths look like this. `Active(anon)_kb` does not end in ')', while
+    // `... max time (msecs)` does -- both must stay whole.
+    for (const path of [
+      'systemMetrics.memory.Active(anon)_kb',
+      'serverStatus.wiredTiger.transaction.transaction checkpoint prepare max time (msecs)',
+    ]) {
+      expect(parseExpr(path)).toEqual({ fn: 'raw', path });
+      expect(exprPaths(parseExpr(`rate(${path})`))).toEqual([path]);
+    }
+  });
+
+  it('preserves a trailing space in a metric name', () => {
+    // WiredTiger emits these; trimming makes the metric unresolvable.
+    const path = 'serverStatus.wiredTiger.reconciliation.pages written including an aggregated newest start durable timestamp ';
+    expect(exprPaths(parseExpr(path))).toEqual([path]);
+    expect(exprPaths(parseExpr(`rate(${path})`))).toEqual([path]);
+    expect(exprPaths(parseExpr(`div(${path}, other.metric)`))).toEqual([path, 'other.metric']);
+  });
+
+  it('strips leading whitespace, which is only ever formatting', () => {
+    expect(parseExpr('  a.b')).toEqual({ fn: 'raw', path: 'a.b' });
+    expect(exprPaths(parseExpr('pct(a.b, c.d)'))).toEqual(['a.b', 'c.d']);
+  });
+
+  it('nests', () => {
+    const e = parseExpr('div(rate(a.lat), rate(a.ops))');
+    expect(exprPaths(e)).toEqual(['a.lat', 'a.ops']);
+    expect(exprToString(e)).toBe('div(rate(a.lat), rate(a.ops))');
+  });
+
+  it('rejects malformed expressions', () => {
+    expect(() => parseExpr('rate(a, b)')).toThrow(ExprError);
+    expect(() => parseExpr('sum(a)')).toThrow(ExprError);
+    expect(() => parseExpr('scale(a, notanumber)')).toThrow(ExprError);
+    expect(() => parseExpr('')).toThrow(ExprError);
+  });
+});
+
+describe('evaluation', () => {
+  it('rates a counter per second', () => {
+    const v = evaluate(parseExpr('rate(c)'), t, raw({ c: [10, 20, 40, 40] }));
+    expect(Number.isNaN(v[0]!)).toBe(true); // nothing to difference against
+    expect(Array.from(v.slice(1))).toEqual([10, 20, 0]);
+  });
+
+  it('breaks the rate when a counter goes backwards', () => {
+    // A counter resetting means the process restarted. Emitting the negative delta would draw
+    // a huge downward spike that reads as a real event.
+    const v = evaluate(parseExpr('rate(c)'), t, raw({ c: [100, 200, 5, 15] }));
+    expect(Number.isNaN(v[2]!)).toBe(true);
+    expect(v[3]).toBe(10);
+  });
+
+  it('computes percentages and guards a zero denominator', () => {
+    const v = evaluate(parseExpr('pct(a, b)'), t, raw({ a: [1, 2, 3, 4], b: [4, 4, 0, 8] }));
+    expect(v[0]).toBe(25);
+    expect(v[1]).toBe(50);
+    expect(Number.isNaN(v[2]!)).toBe(true); // 3/0 is not Infinity, it is "no value"
+    expect(v[3]).toBe(50);
+  });
+
+  it('scales, diffs and sums', () => {
+    expect(Array.from(evaluate(parseExpr('scale(a, 0.1)'), t, raw({ a: [10, 20, 30, 40] })))).toEqual([1, 2, 3, 4]);
+    expect(Array.from(evaluate(parseExpr('diff(a, b)'), t, raw({ a: [5, 5, 5, 5], b: [1, 2, 3, 4] })))).toEqual([4, 3, 2, 1]);
+    expect(Array.from(evaluate(parseExpr('sum(a, b)'), t, raw({ a: [1, 1, 1, 1], b: [2, 2, 2, 2] })))).toEqual([3, 3, 3, 3]);
+  });
+
+  it('treats a gap as absent rather than zero when summing', () => {
+    const v = evaluate(parseExpr('sum(a, b)'), t, raw({ a: [1, NaN, NaN, 1], b: [2, 2, NaN, NaN] }));
+    expect(Array.from(v.slice(0, 2))).toEqual([3, 2]);
+    expect(Number.isNaN(v[2]!)).toBe(true); // no contributor at all -> still a gap
+    expect(v[3]).toBe(1);
+  });
+
+  it('reports an unknown metric rather than returning zeros', () => {
+    expect(() => evaluate(parseExpr('missing.metric'), t, raw({}))).toThrow(ExprError);
+  });
+});
+
+describe('units', () => {
+  it('infers from the path and the wrapping function', () => {
+    expect(unitOf(parseExpr('serverStatus.wiredTiger.cache.bytes read into cache'))).toBe('bytes');
+    expect(unitOf(parseExpr('rate(serverStatus.wiredTiger.cache.bytes read into cache)'))).toBe('bytes/s');
+    expect(unitOf(parseExpr('rate(serverStatus.opcounters.query)'))).toBe('per-sec');
+    expect(unitOf(parseExpr('pct(a, b)'))).toBe('percent');
+    expect(unitOf(parseExpr('serverStatus.wiredTiger.transaction.checkpoint currently running_ms'))).toBe('ms');
+  });
+});
+
+describe('glob expansion', () => {
+  const available = new Set([
+    'systemMetrics.disks.sda.io_time_ms',
+    'systemMetrics.disks.nvme0n1.io_time_ms',
+    'serverStatus.localTime',
+    'replSetGetStatus.members.0.lastAppliedWallTime',
+    'replSetGetStatus.members.1.lastAppliedWallTime',
+  ]);
+
+  it('fans out one series per matching segment', () => {
+    expect(expandMetric('rate(systemMetrics.disks.*.io_time_ms)', available)).toEqual([
+      'rate(systemMetrics.disks.nvme0n1.io_time_ms)',
+      'rate(systemMetrics.disks.sda.io_time_ms)',
+    ]);
+  });
+
+  it('substitutes the same value into every wildcard in one expression', () => {
+    // Otherwise replica lag would produce a cross product instead of one series per member.
+    expect(
+      expandMetric('diff(serverStatus.localTime, replSetGetStatus.members.*.lastAppliedWallTime)', available),
+    ).toEqual([
+      'diff(serverStatus.localTime, replSetGetStatus.members.0.lastAppliedWallTime)',
+      'diff(serverStatus.localTime, replSetGetStatus.members.1.lastAppliedWallTime)',
+    ]);
+  });
+
+  it('drops expressions whose metrics the capture lacks', () => {
+    expect(expandMetric('systemMetrics.disks.*.write_sectors', available)).toEqual([]);
+    expect(expandMetric('not.present.at.all', available)).toEqual([]);
+  });
+
+  it('passes through a non-wildcard expression that resolves', () => {
+    expect(expandMetric('serverStatus.localTime', available)).toEqual(['serverStatus.localTime']);
+  });
+});
+
+describe('role-scoped captures', () => {
+  // MongoDB 8.0 scopes FTDC by role on a sharded cluster: a shard member reports
+  // `shard.serverStatus.…` rather than `serverStatus.…`. A dashboard written against bare
+  // paths matches nothing, which presents as "the dashboard didn't load".
+  const sharded = new Set([
+    'shard.start',
+    'shard.serverStatus.connections.current',
+    'shard.serverStatus.opcounters.query',
+    'shard.replSetGetStatus.members.0.state',
+    'shard.systemMetrics.cpu.user_ms',
+  ]);
+
+  const plain = new Set([
+    'start',
+    'serverStatus.connections.current',
+    'systemMetrics.cpu.user_ms',
+  ]);
+
+  const configShard = new Set([
+    'shard.serverStatus.connections.current',
+    'configsvr.serverStatus.connections.current',
+  ]);
+
+  it('detects a role prefix from the data', () => {
+    expect(detectRolePrefixes(sharded)).toEqual(['shard']);
+    expect(detectRolePrefixes(plain)).toEqual(['']);
+    expect(detectRolePrefixes(configShard)).toEqual(['configsvr', 'shard']);
+  });
+
+  it('does not mistake a nested section for a role', () => {
+    // `local.oplog.rs.stats.…` must not make `oplog` look like a role prefix.
+    expect(detectRolePrefixes(new Set(['local.oplog.rs.stats.storageStats.storageSize']))).toEqual(['']);
+  });
+
+  it('rewrites every path in an expression under a prefix', () => {
+    expect(applyRolePrefix('rate(serverStatus.opcounters.query)', 'shard')).toBe(
+      'rate(shard.serverStatus.opcounters.query)',
+    );
+    expect(
+      applyRolePrefix('diff(serverStatus.localTime, replSetGetStatus.members.0.x)', 'shard'),
+    ).toBe('diff(shard.serverStatus.localTime, shard.replSetGetStatus.members.0.x)');
+    expect(applyRolePrefix('serverStatus.mem.resident', '')).toBe('serverStatus.mem.resident');
+  });
+
+  it('resolves dashboard metrics on a role-scoped capture', () => {
+    const prefixes = detectRolePrefixes(sharded);
+    expect(expandMetric('rate(serverStatus.opcounters.query)', sharded, prefixes)).toEqual([
+      'rate(shard.serverStatus.opcounters.query)',
+    ]);
+    expect(expandMetric('serverStatus.connections.current', sharded, prefixes)).toEqual([
+      'shard.serverStatus.connections.current',
+    ]);
+  });
+
+  it('yields one series per role when a node reports several', () => {
+    const prefixes = detectRolePrefixes(configShard);
+    expect(expandMetric('serverStatus.connections.current', configShard, prefixes)).toEqual([
+      'configsvr.serverStatus.connections.current',
+      'shard.serverStatus.connections.current',
+    ]);
+  });
+
+  it('builds a populated dashboard for a role-scoped capture', () => {
+    const state = defaultDashboard(sharded);
+    const charts = state.panels.filter((p) => p.kind === 'chart');
+    expect(charts.length).toBeGreaterThan(0);
+    expect(charts.flatMap((p) => p.metrics).length).toBeGreaterThan(0);
+  });
+});
+
+describe('mixed role prefixes', () => {
+  // A real sharded 8.0 capture carries BOTH `common.` and `shard.` at once: the clock lives
+  // under common, replication under shard. Applying one prefix to a whole expression loses
+  // any metric that spans two sections -- replica lag being the one that matters most.
+  const shardedCapture = new Set([
+    'common.start',
+    'common.serverStatus.localTime',
+    'common.serverStatus.connections.current',
+    'shard.replSetGetStatus.members.0.lastAppliedWallTime',
+    'shard.replSetGetStatus.members.1.lastAppliedWallTime',
+    'shard.serverStatus.queues.execution.read.available',
+  ]);
+
+  const prefixes = detectRolePrefixes(shardedCapture);
+
+  it('detects both prefixes', () => {
+    expect(prefixes).toEqual(['common', 'shard']);
+  });
+
+  it('resolves each operand under its own prefix', () => {
+    expect(
+      expandMetric(
+        'diff(serverStatus.localTime, replSetGetStatus.members.*.lastAppliedWallTime)',
+        shardedCapture,
+        prefixes,
+      ),
+    ).toEqual([
+      'diff(common.serverStatus.localTime, shard.replSetGetStatus.members.0.lastAppliedWallTime)',
+      'diff(common.serverStatus.localTime, shard.replSetGetStatus.members.1.lastAppliedWallTime)',
+    ]);
+  });
+
+  it('applies an alias and a role prefix together', () => {
+    // Tickets renamed in 8.0 AND scoped by role: both substitutions have to happen.
+    expect(
+      expandMetric(
+        'serverStatus.wiredTiger.concurrentTransactions.read.available',
+        shardedCapture,
+        prefixes,
+      ),
+    ).toEqual(['shard.serverStatus.queues.execution.read.available']);
+  });
+
+  it('does not invent a metric the capture lacks', () => {
+    expect(expandMetric('serverStatus.mem.resident', shardedCapture, prefixes)).toEqual([]);
+  });
+});

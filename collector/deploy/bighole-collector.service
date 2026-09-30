@@ -1,0 +1,31 @@
+# One collection round: capture, analyse, write the status page, send what is worth sending.
+#
+# A service rather than a cron line so that failures land in the journal with the rest, and so
+# that `systemctl status` answers "is this working" without anybody grepping a log file.
+
+[Unit]
+Description=Big Hole collector — collect and analyse
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=bighole
+Group=bighole
+WorkingDirectory=/srv/bighole/collector
+EnvironmentFile=-/etc/bighole/collector.env
+
+ExecStart=/srv/bighole/collector/run.sh --send --prune
+
+# The analysis reads a day of FTDC at full resolution: about 400 MB for three nodes, more for
+# a customer with more. Generous, and still a ceiling rather than the whole machine.
+MemoryMax=4G
+
+# Long enough for a slow Atlas job on a big cluster, short enough that a hung run does not
+# block the next one for ever.
+TimeoutStartSec=45min
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/bighole
