@@ -1,0 +1,16 @@
+# What the image is built from is the source; none of this is.
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+.git
+big-hole/dist
+big-hole/sample-data
+big-hole/docs/img
+big-hole/tools/browser/*.png
+big-hole/tools/analyze.ts
+collector/config.json
+collector/data
+collector/outbox
+collector/logs
+collector/site
+.env

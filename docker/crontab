@@ -1,0 +1,9 @@
+# The same schedule the systemd timers in collector/deploy run, in UTC.
+#
+# The collection round. Hourly, because Atlas filters its FTDC download by file name and an hour
+# brings down no more than six do.
+5 * * * *   /app/docker/entrypoint.sh run
+# The check on the checker, half an hour away from the round it watches.
+35 * * * *  /app/docker/entrypoint.sh watchdog
+# The weekly summary, which goes out even when nothing happened.
+10 8 * * 1  /app/docker/entrypoint.sh digest

@@ -193,7 +193,7 @@ class AtlasSource:
 
         target = tmp / "extracted"
         with tarfile.open(tarball) as t:
-            t.extractall(target, filter="data")
+            extract(t, target)
 
         paths = [p for p in sorted(target.rglob("metrics.*")) if p.is_file()]
         self.expected = len(paths)
@@ -282,7 +282,28 @@ class AtlasSource:
         raise TimeoutError(f"job {job_id} is still building after {timeout}s — "
                            f"the next run will collect it")
 
+    # A download cut halfway is retried from the start rather than resumed: the bundle is a
+    # stream with no byte ranges we can rely on, and measured on a real first capture, fetching
+    # it again took 90 seconds -- against 25 minutes for Atlas to build a new one at the next
+    # run. Seen once in a container, on the first capture: "Response ended prematurely".
+    DOWNLOAD_ATTEMPTS = 3
+    DOWNLOAD_BACKOFF = 10  # seconds, doubled after each failure
+
     def _download(self, job_id: str, target: Path) -> None:
+        for attempt in range(1, self.DOWNLOAD_ATTEMPTS + 1):
+            try:
+                self._download_once(job_id, target)
+                return
+            except (requests.exceptions.ChunkedEncodingError,
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as e:
+                if attempt == self.DOWNLOAD_ATTEMPTS:
+                    raise
+                wait = self.DOWNLOAD_BACKOFF * 2 ** (attempt - 1)
+                print(f"  download interrupted ({type(e).__name__}); retrying in {wait}s")
+                time.sleep(wait)
+
+    def _download_once(self, job_id: str, target: Path) -> None:
         r = requests.get(
             f"{self.BASE}/groups/{self.group_id}/logCollectionJobs/{job_id}/download",
             auth=self.auth, timeout=600, stream=True,
@@ -299,6 +320,29 @@ class AtlasSource:
                 fh.write(block)
                 got += len(block)
                 self.on_progress("download", done=got, total=total)
+
+
+def extract(tar: tarfile.TarFile, target: Path) -> None:
+    """Unpack a bundle without letting a member write outside `target`.
+
+    The `data` filter does exactly that, but it only exists from Python 3.11.4 and 3.10.12 (and
+    3.12 on): Debian 12 ships 3.11.2, and on it every Atlas capture failed at this line. Without
+    the filter, the same guarantee by hand: regular files and directories only -- no links, no
+    devices -- and nothing whose resolved path leaves the target.
+    """
+    if hasattr(tarfile, "data_filter"):
+        tar.extractall(target, filter="data")
+        return
+    root = Path(target).resolve()
+    safe = []
+    for member in tar.getmembers():
+        if not (member.isfile() or member.isdir()):
+            continue
+        dest = (root / member.name).resolve()
+        if dest != root and root not in dest.parents:
+            raise ValueError(f"refusing to extract {member.name!r}: it points outside {root}")
+        safe.append(member)
+    tar.extractall(target, members=safe)
 
 
 # ------------------------------------------------------------------- self-managed

@@ -139,3 +139,106 @@ def test_a_non_numeric_parent_is_the_node():
 def test_diagnostic_data_at_the_root_falls_back():
     """Nothing above it to name the node with, so the caller's default stands."""
     assert node_from_path(Path("diagnostic.data/" + NAME), "fallback") == "fallback"
+
+
+# ------------------------------------------------------------------- unpacking a bundle
+
+import io  # noqa: E402
+import tarfile  # noqa: E402
+
+import pytest  # noqa: E402
+
+from sources import extract  # noqa: E402
+
+
+def a_tarball(tmp: Path, members: list[tuple[str, str | None]]) -> Path:
+    """(name, link target or None for a file)."""
+    path = tmp / "bundle.tar"
+    with tarfile.open(path, "w") as t:
+        for name, link in members:
+            info = tarfile.TarInfo(name)
+            if link is None:
+                data = b"x"
+                info.size = len(data)
+                t.addfile(info, io.BytesIO(data))
+            else:
+                info.type, info.linkname = tarfile.SYMTYPE, link
+                t.addfile(info)
+    return path
+
+
+@pytest.fixture(params=["with the data filter", "without it"])
+def filters(request, monkeypatch):
+    """Both paths, whichever Python runs the tests: Debian 12's 3.11.2 has no filter at all."""
+    if request.param == "without it":
+        monkeypatch.delattr(tarfile, "data_filter", raising=False)
+    return request.param
+
+
+def test_a_bundle_unpacks(tmp_path, filters):
+    tar = a_tarball(tmp_path, [(f"n0/27017/diagnostic.data/{NAME}", None)])
+    with tarfile.open(tar) as t:
+        extract(t, tmp_path / "out")
+    assert (tmp_path / "out" / "n0/27017/diagnostic.data" / NAME).exists()
+
+
+def test_a_member_cannot_climb_out(tmp_path, filters):
+    tar = a_tarball(tmp_path, [("../escaped", None)])
+    with tarfile.open(tar) as t, pytest.raises(Exception):
+        extract(t, tmp_path / "out")
+    assert not (tmp_path / "escaped").exists()
+
+
+def test_a_link_is_not_followed_out(tmp_path, filters):
+    tar = a_tarball(tmp_path, [("n0/evil", "/etc/passwd")])
+    with tarfile.open(tar) as t:
+        try:
+            extract(t, tmp_path / "out")
+        except Exception:
+            pass  # the data filter refuses it outright; the fallback skips it
+    assert not (tmp_path / "out" / "n0" / "evil").is_symlink()
+
+
+# --------------------------------------------------------------- a download cut halfway
+
+class _Cut:
+    """A response whose body stops after the first block."""
+    headers = {"Content-Length": "4"}
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, chunk_size):
+        yield b"ab"
+        raise sources_mod.requests.exceptions.ChunkedEncodingError("Response ended prematurely")
+
+
+class _Whole:
+    headers = {"Content-Length": "4"}
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, chunk_size):
+        yield b"abcd"
+
+
+import sources as sources_mod  # noqa: E402
+
+
+def test_a_cut_download_is_fetched_again_from_the_start(tmp_path, monkeypatch):
+    replies = [_Cut(), _Whole()]
+    monkeypatch.setattr(sources_mod.requests, "get", lambda *a, **kw: replies.pop(0))
+    monkeypatch.setattr(sources_mod.time, "sleep", lambda s: None)
+    target = tmp_path / "bundle.tar.gz"
+    AtlasSource("g", "rs", "pub", "priv")._download("job1", target)
+    assert target.read_bytes() == b"abcd", "the second attempt overwrites, it does not append"
+
+
+def test_a_download_that_keeps_failing_gives_up(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(sources_mod.requests, "get", lambda *a, **kw: calls.append(1) or _Cut())
+    monkeypatch.setattr(sources_mod.time, "sleep", lambda s: None)
+    with pytest.raises(sources_mod.requests.exceptions.ChunkedEncodingError):
+        AtlasSource("g", "rs", "pub", "priv")._download("job1", tmp_path / "b")
+    assert len(calls) == AtlasSource.DOWNLOAD_ATTEMPTS

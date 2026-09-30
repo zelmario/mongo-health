@@ -11,3 +11,7 @@ __pycache__/
 
 # Copied from collector/runner/analyze.ts on every run; edit that one.
 big-hole/tools/analyze.ts
+
+# Docker
+.env
+config/config.json

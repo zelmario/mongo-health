@@ -1,0 +1,38 @@
+# The collector, and a web server for the report it builds.
+#
+#   cp .env.example .env                       # the Atlas key and SMTP password, if any
+#   docker compose run --rm collector onboard --group-id <atlas project id> --notify you@x.com
+#   docker compose up -d
+#   open http://localhost:8080
+#
+# Everything the collector keeps is in the `data` volume: raw FTDC, the baseline, findings and
+# the outbox. The baseline is the part that cannot be rebuilt, because the FTDC it came from is
+# gone from Atlas within days -- back that volume up.
+
+services:
+  collector:
+    build: .
+    image: bighole-collector
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./config:/etc/bighole
+      - data:/var/lib/bighole/data
+      - site:/var/lib/bighole/site
+
+  report:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    # Bound to this machine only: the report describes your clusters. To reach it from
+    # elsewhere, put it behind something that asks who is looking.
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - site:/usr/share/nginx/html:ro
+      - ./docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  data:
+  site:
