@@ -159,3 +159,24 @@ def test_the_config_is_not_world_readable(tmp_path: Path):
     cfg = tmp_path / "config.json"
     add_to_config(cfg, [], "g", [{"name": "c1", "replica_set": "rs1"}], KEYS)
     assert cfg.stat().st_mode & 0o077 == 0, "no access for group or others"
+
+
+def test_onboarding_ends_with_the_first_evaluation(tmp_path, monkeypatch, capsys):
+    """The last thing on screen after onboarding is the answer, not a path to a file."""
+    import onboard
+
+    monkeypatch.setenv("ATLAS_PUBLIC_KEY", "pub")
+    monkeypatch.setenv("ATLAS_PRIVATE_KEY", "priv")
+    monkeypatch.setattr(onboard, "discover", lambda *a: [
+        {"name": "c1", "replica_set": "rs1", "tier": "M10", "version": "8.0",
+         "state": "IDLE", "autoscaling": False}])
+    # Capture and analysis are their own programs with their own tests; here they succeed
+    # and leave nothing behind, which is a cluster with nothing captured yet.
+    monkeypatch.setattr(onboard, "run", lambda cmd, quiet: True)
+    monkeypatch.setattr(sys, "argv", ["onboard", "--config", str(tmp_path / "config.json"),
+                                      "--data", str(tmp_path / "data"),
+                                      "--site", str(tmp_path / "site"), "--group-id", "g"])
+    assert onboard.main() == 0
+    out = capsys.readouterr().out
+    assert "c1: Not being watched" in out
+    assert (tmp_path / "site" / "c1" / "index.html").exists()

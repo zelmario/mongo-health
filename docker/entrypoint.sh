@@ -75,7 +75,7 @@ case "$cmd" in
   onboard)
     # onboard.py starts a new file when there is none; an empty one it would fail to parse.
     [ -s "$CONFIG" ] || rm -f "$CONFIG"
-    exec python3 onboard.py --config "$CONFIG" --data "$DATA" "$@"
+    exec python3 onboard.py --config "$CONFIG" --data "$DATA" --site "$SITE" "$@"
     ;;
   report)
     need_config

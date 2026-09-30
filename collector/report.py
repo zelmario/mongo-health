@@ -31,6 +31,7 @@ import profile as profile_report
 import runway
 from group import group as group_findings, moments as by_moment, name_nodes
 from notify import changes_before
+from verdict import Verdict, evaluate
 from profile import times_before
 from watchdog import STALE_AFTER_HOURS
 
@@ -844,6 +845,23 @@ h2 { font-size: 1.0625rem; margin: 2rem 0 0.8rem; }
 """
 
 INCIDENT_CSS = """
+/* The verdict: the answer before the evidence. The colour is the state; the rail makes it
+   readable in a glance down a list, and the text says it again for anyone who cannot rely on
+   colour. */
+.verdict { border: 1px solid var(--edge); border-left: 4px solid var(--v); background: var(--panel);
+           padding: 1rem 1.2rem; margin: 0 0 1.5rem; }
+.verdict, .verdict-pill { --v: var(--ink-faint); }
+[data-state="healthy"] { --v: var(--ok); }
+[data-state="attention"] { --v: var(--warn); }
+[data-state="at_risk"] { --v: var(--bad); }
+[data-state="unwatched"] { --v: var(--signal); }
+.verdict-label { color: var(--v); font-weight: 700; font-size: 1.125rem; margin-bottom: .25rem; }
+.verdict p { margin: 0; color: var(--ink-soft); }
+.verdict a { color: var(--ink); }
+.verdict ul { margin: .6rem 0 0; padding-left: 1.1rem; color: var(--ink-soft); font-size: .9375rem; }
+.verdict-pill { display: inline-block; margin-left: .5rem; padding: 0 .45rem; font-size: .75rem;
+                font-weight: 600; color: var(--v); border: 1px solid var(--v); vertical-align: middle; }
+
 /* The incident itself, pinned to the axis. It gets the panel and the severity rail; the two
    events above it on the spine are lines, because they are context and this is the subject. */
 .here { background: var(--panel); border: 1px solid var(--edge);
@@ -963,14 +981,20 @@ def chart_img(src: str, alt: str, css_class: str = "shape") -> str:
             f'src="{esc(src)}" alt="{esc(alt)}">')
 
 
-def silent_hours(state: dict, now: datetime) -> float | None:
-    """Hours since data last arrived, if that is longer than the watchdog allows, else None.
+def silent_hours(state: dict, now: datetime, summary: dict | None = None) -> float | None:
+    """Hours since the newest sample held, if that is longer than the watchdog allows, else None.
 
-    Worked out from a timestamp and the clock when the page is built, never read from a stored
+    The newest SAMPLE, from the analysis, not when files last arrived: a directory that is
+    handed six-week-old files today delivers new files and no present, and the page said "no
+    data for 9 hours" about a replica set whose last sample was from August. Before there is an
+    analysis, the arrival is all there is. Measured on Atlas, the newest sample trails the
+    capture by minutes, so the watchdog's threshold holds for both.
+
+    Worked out from timestamps and the clock when the page is built, never read from a stored
     "healthy" flag -- the collector having stopped is exactly when such a flag would be wrong.
-    Judged on the same fact and threshold as `watchdog.py`, so the page and the alert agree.
     """
-    last = state.get("last_new_data") or state.get("last_capture")
+    samples = [n.get("to") for n in (summary or {}).get("nodes") or [] if n.get("to")]
+    last = max(samples) if samples else (state.get("last_new_data") or state.get("last_capture"))
     if not last:
         return None
     try:
@@ -1065,12 +1089,36 @@ def card(g, cluster_id: str, findings: list[dict], chart_file, muted: set[str]) 
         </article>"""
 
 
+def verdict_block(v: Verdict, state: dict, incidents: str) -> str:
+    """The answer, before any of the evidence. `incidents` is the relative path to the
+    incident pages, so the moment that decided it is one click away."""
+    link = ""
+    if v.evidence:
+        worst = v.evidence[0].groups[0].worst
+        link = (f' <a href="{esc(incidents)}{esc(worst["id"])}.html">'
+                f'See {"it" if len(v.evidence) == 1 else "the worst one"}</a>')
+    causes = ""
+    if v.state == "unwatched" and state.get("last_capture"):
+        # What usually stops collection, by how the files arrive. Said here rather than in a
+        # banner of its own: the verdict already says nobody is watching, and a second box
+        # saying the same thing reads as two problems.
+        causes = "<ul>" + "".join(
+            f"<li>{esc(c[:1].upper() + c[1:])}.</li>"
+            for c in CAUSES.get(state.get("source_kind") or "", DEFAULT_CAUSES)) + "</ul>"
+    return f"""
+    <section class="verdict" data-state="{esc(v.state)}">
+      <div class="verdict-label">{esc(v.label)}</div>
+      <p>{esc(v.reason)}{link}</p>
+      {causes}
+    </section>"""
+
+
 def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, older: int,
                  findings: list[dict], chart_file, profile_html: str | None,
-                 muted: set[str], now: datetime) -> str:
+                 muted: set[str], now: datetime, verdict: Verdict) -> str:
     """One cluster: what happened to it, newest first, and what normal looks like there."""
     cutoff = int(now.timestamp() * 1000) - WINDOW_DAYS * 86_400_000
-    quiet = silent_hours(state, now)
+    quiet = silent_hours(state, now, summary)
 
     events: list[tuple[int, str]] = []
     moments = by_moment(list(recent))
@@ -1101,22 +1149,6 @@ def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, olde
         found = (f'<div class="quiet"><b>Nothing to report in the last {WINDOW_DAYS} days</b>'
                  '<p>Every check ran and none of them fired.</p></div>')
 
-    banner = ""
-    if quiet is not None:
-        causes = "".join(f"<li>{esc(c[:1].upper() + c[1:])}.</li>"
-                         for c in CAUSES.get(state.get("source_kind") or "", DEFAULT_CAUSES))
-        banner = f"""
-        <div class="card" style="border-color:var(--signal);margin-bottom:1.5rem">
-          <p style="margin:0 0 .4rem;font-weight:600;color:var(--signal)">
-            Nothing has been collected for {esc(how_long_silent(quiet))}</p>
-          <p style="margin:0 0 .6rem;color:var(--ink-soft);font-size:.9375rem">
-            While this lasts nobody is watching this cluster, and everything below is from
-            before the silence rather than from now. The cluster itself may well be fine —
-            this is about collection stopping.</p>
-          <ul style="margin:0;padding-left:1.1rem;color:var(--ink-soft);font-size:.9375rem">
-            {causes}</ul>
-        </div>"""
-
     # Both numbers, because the reader can see both: the incidents are the boxes below and the
     # signals are the rows inside them.
     signals = sum(len(m.groups) for m in moments)
@@ -1140,7 +1172,7 @@ def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, olde
     body = f"""
     <p><a href="../index.html" class="back">← all clusters</a></p>
     <h1>{esc(cluster_id)}</h1>
-    {banner}
+    {verdict_block(verdict, state, "incidents/")}
     {lede}
     <h2>What happened</h2>
     {'<p class="lede">Newest first. Anything that changed on the cluster sits on the same '
@@ -1319,17 +1351,21 @@ def page_index(rows: list[dict], now: datetime) -> str:
         word = "incident" if n == 1 else "incidents"
         badge = (f'<a class="count{" none" if not n else ""}" '
                  f'href="{esc(r["id"])}/index.html">{n} {word}</a>' if r["captured"] else "")
+        v = r["verdict"]
         items.append(f"""
         <div class="cluster">
-          <div style="flex:1">
-            <div class="name"><a href="{esc(r['id'])}/index.html">{esc(r['id'])}</a></div>
+          <div style="flex:1;min-width:0">
+            <div class="name"><a href="{esc(r['id'])}/index.html">{esc(r['id'])}</a>
+              <span class="verdict-pill" data-state="{esc(v.state)}">{esc(v.label)}</span></div>
+            <div class="meta">{esc(v.reason)}</div>
             <div class="meta">{esc(state)}</div>
           </div>
           {badge}
         </div>""")
     body = f"""
-    <h1>Your clusters</h1>
-    <p class="lede">Incidents counted over the last {WINDOW_DAYS} days.</p>
+    <h1>Is my cluster healthy?</h1>
+    <p class="lede">One answer per cluster, from every check over all the history held.
+       Incidents counted over the last {WINDOW_DAYS} days.</p>
     <div class="card">{''.join(items)}</div>"""
     return layout("Big Hole", body, "", now)
 
@@ -1403,9 +1439,12 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
         return name
 
     muted = set(spec.get("mute") or [])
+    verdict = evaluate(findings, now, silent_hours(state, now, summary),
+                       bool(state.get("last_capture")),
+                       float(summary.get("days_of_raw_ftdc") or 0))
     write(site / "index.html",
           page_cluster(cluster_id, summary, state, recent, len(by_moment(list(older))),
-                       findings, chart_file, profile_section(base, now), muted, now))
+                       findings, chart_file, profile_section(base, now), muted, now, verdict))
     if older:
         write(site / "history.html", page_history(cluster_id, older, now))
     elif (site / "history.html").exists():
@@ -1433,11 +1472,12 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
     return {
         "id": cluster_id,
         "captured": bool(state.get("last_capture")),
-        "quiet": silent_hours(state, now),
+        "quiet": silent_hours(state, now, summary),
         "days_observed": float(summary.get("days_observed") or 0),
         "days_raw": float(summary.get("days_of_raw_ftdc") or 0),
         "megabytes": float(summary.get("megabytes") or 0),
         "recent": len(by_moment(list(recent))),
+        "verdict": verdict,
     }
 
 
@@ -1473,7 +1513,7 @@ def main() -> int:
     rows = build(clusters, args.data, args.out, now)
     print(f"{args.out}/index.html · {len(rows)} cluster(s)")
     for r in rows:
-        print(f"  {r['id']:24} {r['recent']} incident(s) in {WINDOW_DAYS} d")
+        print(f"  {r['id']:24} {r['verdict'].label:18} {r['verdict'].reason}")
     return 0
 
 

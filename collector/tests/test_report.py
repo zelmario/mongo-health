@@ -110,9 +110,27 @@ def test_a_silent_cluster_says_so_above_everything_else(tmp_path):
     spec = cluster(tmp_path / "data", [], last_data=NOW - timedelta(days=3))
     out = build(tmp_path, [spec])
     page = (out / "prod" / "index.html").read_text()
-    assert "Nothing has been collected for 3 days" in page
+    assert "Not being watched" in page and "No data has arrived for 3 days" in page
+    assert page.index("Not being watched") < page.index("What happened"), "answer first"
+    assert "The API key was deleted" in page, "and what usually causes it"
     assert "up to the silence" in page, "and the empty list must not read as an all-clear"
-    assert "nobody is watching it" in (out / "index.html").read_text()
+    index = (out / "index.html").read_text()
+    assert "Not being watched" in index and "nobody is watching it" in index
+
+
+def test_the_verdict_links_to_what_decided_it(tmp_path):
+    spec = cluster(tmp_path / "data", [finding("a", at=MS - 3 * HOUR)])
+    out = build(tmp_path, [spec])
+    page = (out / "prod" / "index.html").read_text()
+    assert "At risk" in page
+    assert 'href="incidents/a.html">See it</a>' in page
+    assert "At risk" in (out / "index.html").read_text()
+
+
+def test_a_quiet_cluster_is_called_healthy(tmp_path):
+    spec = cluster(tmp_path / "data", [finding("old", at=MS - 20 * DAY)])
+    out = build(tmp_path, [spec])
+    assert "Healthy" in (out / "prod" / "index.html").read_text()
 
 
 def test_a_muted_rule_is_still_shown_and_says_it_is_muted(tmp_path):
@@ -177,3 +195,14 @@ def test_a_change_has_its_own_page_without_a_duration(tmp_path):
 def test_bytes_are_written_the_way_a_person_reads_them():
     assert report.unit_value(1610612736, "bytes") == "1.5 GiB"
     assert report.unit_value(12, "bytes") == "12 bytes"
+
+
+def test_old_samples_delivered_today_are_still_old(tmp_path):
+    """Files that arrived an hour ago but end in August describe August, not now."""
+    spec = cluster(tmp_path / "data", [], last_data=NOW - timedelta(hours=1))
+    summary_path = tmp_path / "data" / "prod" / "summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["nodes"] = [{"node": "n0", "to": (NOW - timedelta(days=40)).isoformat()}]
+    summary_path.write_text(json.dumps(summary))
+    page = (build(tmp_path, [spec]) / "prod" / "index.html").read_text()
+    assert "Not being watched" in page and "40 days" in page

@@ -21,7 +21,7 @@ What it does, in order:
   2. writes them into the config, so the cron picks them up from then on
   3. captures with no date filter -- everything Atlas is holding
   4. analyses it, which fills the baseline with a real starting point rather than one sample
-  5. writes the profile report (see profile.py)
+  5. evaluates it, and writes the report with the verdict (see report.py and verdict.py)
 
 Steps 3 to 5 are the same code the cron runs. Onboarding is not a separate pipeline, it is the
 normal one with the date filter turned off.
@@ -38,6 +38,8 @@ from pathlib import Path
 
 import requests
 from requests.auth import HTTPDigestAuth
+
+import config
 
 BASE = "https://cloud.mongodb.com/api/atlas/v1.0"
 
@@ -115,6 +117,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=Path, default=Path("config.json"))
     ap.add_argument("--data", type=Path, default=Path("data"))
+    ap.add_argument("--site", type=Path, default=Path("site"), help="where the report is written")
     ap.add_argument("--group-id", required=True, help="the Atlas project id")
     ap.add_argument("--public-key", help="default: $ATLAS_PUBLIC_KEY")
     ap.add_argument("--private-key", help="default: $ATLAS_PRIVATE_KEY")
@@ -192,11 +195,17 @@ def main() -> int:
                      str(args.data), "--cluster", c["name"]], args.quiet) for c in wanted]):
         return 1
 
-    print("\nwriting the profile")
-    for c in wanted:
-        run(["python3", "profile.py", "--data", str(args.data),
-             "--cluster", c["name"], "--out", f"profile-{c['name']}.html"], args.quiet)
+    # The first evaluation, over everything Atlas still held. Printed as well as written: the
+    # answer to "is it healthy?" should be the last thing on the screen after onboarding, not a
+    # file somebody has to know to open.
+    print("\nthe first evaluation")
+    import report  # noqa: PLC0415 -- matplotlib is slow to import, and only needed here
 
+    rows = report.build(config.load_clusters(args.config), args.data, args.site)
+    for r in rows:
+        if r["id"] in {c["name"] for c in wanted}:
+            print(f"\n  {r['id']}: {r['verdict'].label}\n  {r['verdict'].reason}")
+    print(f"\n  the full report: {args.site / 'index.html'}")
     return 0
 
 
