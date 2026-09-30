@@ -206,3 +206,81 @@ def test_old_samples_delivered_today_are_still_old(tmp_path):
     summary_path.write_text(json.dumps(summary))
     page = (build(tmp_path, [spec]) / "prod" / "index.html").read_text()
     assert "Not being watched" in page and "40 days" in page
+
+
+# ------------------------------------------------------------------------------ capacity
+
+def baseline_rows(data: Path, node: str, values: dict[str, float], days: float = 10) -> None:
+    rows = [{"scope": "baseline", "run": NOW.isoformat(), "node": node, "metric": m,
+             "fromMs": MS - int(days * DAY), "toMs": MS,
+             "min": v, "max": v, "p50": v, "p95": v, "p99": v, "mean": v, "n": 100}
+            for m, v in values.items()]
+    (data / "prod" / "baseline.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+
+GB = 1024 ** 3
+BUSY_HOST = {
+    "systemMetrics.memory.MemTotal_kb": 16 * GB, "systemMetrics.memory.MemAvailable_kb": 3 * GB,
+    "systemMetrics.cpu.num_logical_cores": 20,
+    "rate(systemMetrics.cpu.user_ms)": 16_000, "rate(systemMetrics.cpu.system_ms)": 9_000,
+    "serverStatus.wiredTiger.cache.bytes currently in the cache": 1.4 * GB,
+    "serverStatus.wiredTiger.cache.maximum bytes configured": 1.5 * GB,
+    "serverStatus.wiredTiger.concurrentTransactions.read.out": 57,
+    "serverStatus.wiredTiger.concurrentTransactions.read.totalTickets": 63,
+}
+
+
+def with_nodes(data: Path, *nodes: tuple[str, str]) -> None:
+    path = data / "prod" / "summary.json"
+    summary = json.loads(path.read_text())
+    summary["nodes"] = [{"node": n, "hostname": h, "to": NOW.isoformat()} for n, h in nodes]
+    path.write_text(json.dumps(summary))
+
+
+def test_capacity_shows_each_resource_at_its_busiest(tmp_path):
+    data = tmp_path / "data"
+    spec = cluster(data, [])
+    with_nodes(data, ("rs27017", "db1"))
+    baseline_rows(data, "rs27017", BUSY_HOST)
+    page = (build(tmp_path, [spec]) / "prod" / "index.html").read_text()
+    assert "<h2>Capacity</h2>" in page
+    assert "Tight: execution tickets peaked at 90%" in page
+    assert "57 of 63 read tickets" in page
+
+
+def test_cpu_is_a_range_when_the_two_peaks_cannot_be_added(tmp_path):
+    """16 cores of user and 9 of system on a 20-core host: at least 16, at most 20. Never 25."""
+    data = tmp_path / "data"
+    spec = cluster(data, [])
+    with_nodes(data, ("rs27017", "db1"))
+    baseline_rows(data, "rs27017", BUSY_HOST)
+    page = (build(tmp_path, [spec]) / "prod" / "index.html").read_text()
+    assert "16.0–20.0 of 20 cores" in page
+    assert "25." not in page.split("<h2>Capacity</h2>")[1].split("</table>")[0]
+
+
+def test_a_full_cache_is_not_called_tight(tmp_path):
+    """WiredTiger fills its cache by design."""
+    data = tmp_path / "data"
+    spec = cluster(data, [])
+    with_nodes(data, ("n0", "n0"))
+    calm = {k: v for k, v in BUSY_HOST.items()}
+    calm.update({"rate(systemMetrics.cpu.user_ms)": 2_000, "rate(systemMetrics.cpu.system_ms)": 500,
+                 "serverStatus.wiredTiger.concurrentTransactions.read.out": 5})
+    baseline_rows(data, "n0", calm)
+    page = (build(tmp_path, [spec]) / "prod" / "index.html").read_text()
+    assert "Has headroom" in page
+
+
+def test_an_idle_cluster_is_called_larger_than_it_needs(tmp_path):
+    data = tmp_path / "data"
+    spec = cluster(data, [])
+    with_nodes(data, ("n0", "n0"))
+    idle = {k: v for k, v in BUSY_HOST.items()}
+    idle.update({"systemMetrics.memory.MemAvailable_kb": 12 * GB,
+                 "rate(systemMetrics.cpu.user_ms)": 2_000, "rate(systemMetrics.cpu.system_ms)": 500,
+                 "serverStatus.wiredTiger.cache.bytes currently in the cache": 0.5 * GB,
+                 "serverStatus.wiredTiger.concurrentTransactions.read.out": 5})
+    baseline_rows(data, "n0", idle, days=30)
+    page = (build(tmp_path, [spec]) / "prod" / "index.html").read_text()
+    assert "Larger than it needs: in 30 days" in page

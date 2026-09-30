@@ -32,6 +32,7 @@ import runway
 from group import group as group_findings, moments as by_moment, name_nodes
 from notify import changes_before
 from verdict import Verdict, evaluate
+import sizing
 from profile import times_before
 from watchdog import STALE_AFTER_HOURS
 
@@ -845,6 +846,21 @@ h2 { font-size: 1.0625rem; margin: 2rem 0 0.8rem; }
 """
 
 INCIDENT_CSS = """
+/* Capacity: one row per resource, the bar is the share of it used at the busiest moment. */
+table.capacity th { text-align: left; }
+table.capacity td.num, table.capacity .num { font-family: var(--mono); white-space: nowrap; }
+.bar-cell { display: flex; align-items: center; gap: .5rem; min-width: 9rem; }
+.use-bar { flex: 1; height: .45rem; background: var(--edge); position: relative; }
+.use-bar::after { content: ""; position: absolute; inset: 0 auto 0 0; width: var(--w);
+                  background: var(--ink-faint); }
+.use-bar[data-level="high"]::after { background: var(--bad); }
+.use-bar[data-level="low"]::after { background: var(--ok); }
+.capacity-line { font-weight: 600; margin: 0 0 .8rem; }
+.capacity-line[data-state="tight"] { color: var(--bad); }
+.capacity-line[data-state="spare"] { color: var(--ok); }
+ul.forecasts { margin: 0 0 1rem; padding-left: 1.1rem; }
+ul.forecasts a { color: var(--warn); }
+
 /* The verdict: the answer before the evidence. The colour is the state; the rail makes it
    readable in a glance down a list, and the text says it again for anyone who cannot rely on
    colour. */
@@ -1113,9 +1129,116 @@ def verdict_block(v: Verdict, state: dict, incidents: str) -> str:
     </section>"""
 
 
+# What each dimension of capacity is called on the page, in the order a DBA would read them.
+RESOURCES = [("memory", "Memory"), ("cpu", "CPU"), ("cache", "WiredTiger cache"),
+             ("concurrency", "Execution tickets"), ("connections", "Connections")]
+
+# Above this at its worst moment, a resource is tight. Not the cache: WiredTiger keeps it filled
+# to around 80% and evicts harder towards 95% by design, so a full cache is the engine working,
+# and calling it tight would put "tight" on every busy cluster.
+TIGHT_ABOVE = 0.9
+
+
+def capacity(base: Path, summary: dict, findings: list[dict], now: datetime) -> dict:
+    """Peak use of each resource against what the cluster has, over all the history held.
+
+    The busiest member decides each row: every member of a replica set is the same size, so a
+    resource is only spare if it is spare on the one that works hardest.
+    """
+    rows = sizing._rows(base / "baseline.jsonl")
+    worst: dict[str, tuple[sizing.Resource, str]] = {}
+    for node in summary.get("nodes") or []:
+        key = node.get("node") or node.get("hostname")
+        for r in sizing.resources_for(rows, key) if key else []:
+            if r.name not in worst or r.fraction > worst[r.name][0].fraction:
+                worst[r.name] = (r, node.get("hostname") or key)
+    spans = [(row.get("fromMs"), row.get("toMs")) for row in rows
+             if row.get("fromMs") and row.get("toMs")]
+    days = ((max(t for _, t in spans) - min(f for f, _ in spans)) / 86_400_000) if spans else 0.0
+
+    # CPU is stored as two rates, user and system, and their peaks need not be the same moment.
+    # Their sum is what sizing uses, deliberately high; on the page it read 25.1 of 20 cores for
+    # three members sharing one host. What is known is a range: at least the larger of the two,
+    # at most the sum or the host, whichever is less. Tight is judged on the floor.
+    cpu_floor = {}
+    if "cpu" in worst:
+        r, label = worst["cpu"]
+        node = next((n for n in summary.get("nodes") or []
+                     if (n.get("hostname") or n.get("node")) == label), {})
+        key = node.get("node") or label
+        ceiling = r.capacity
+        user = sizing._peak(rows, "rate(systemMetrics.cpu.user_ms)", key, possible=ceiling) or 0
+        system = sizing._peak(rows, "rate(systemMetrics.cpu.system_ms)", key,
+                              possible=ceiling) or 0
+        cpu_floor = {"low": max(user, system), "high": min(r.used, ceiling)}
+        worst["cpu"] = (sizing.Resource("cpu", cpu_floor["low"], ceiling, "cores"), label)
+
+    tight = [(name, worst[name][0]) for name, _ in RESOURCES
+             if name in worst and name != "cache" and worst[name][0].fraction >= TIGHT_ABOVE]
+    if not worst:
+        state, line = "unknown", "Not enough measured yet to say."
+    elif tight:
+        label = dict(RESOURCES)
+        state = "tight"
+        line = "Tight: " + ", ".join(f"{label[n].lower()} peaked at {r.fraction * 100:.0f}%"
+                                     for n, r in tight) + "."
+    elif (days >= sizing.MIN_DAYS and {"memory", "cpu"} <= set(worst)
+          and all(r.fraction < sizing.SPARE_BELOW for r, _ in worst.values())):
+        state = "spare"
+        line = (f"Larger than it needs: in {days:.0f} days nothing went past half of what the "
+                f"cluster has.")
+    else:
+        state, line = "headroom", "Has headroom: nothing came close to its limit."
+
+    now_ms = int(now.timestamp() * 1000)
+    forecasts = [f for f in findings if f.get("rule") == "capacity-runway"
+                 and int(f["toMs"]) >= now_ms - 7 * 86_400_000]
+    return {"state": state, "line": line, "days": days, "worst": worst, "forecasts": forecasts,
+            "cpu_range": cpu_floor}
+
+
+def capacity_section(cap: dict) -> str:
+    if not cap["worst"] and not cap["forecasts"]:
+        return ""
+    rows = []
+    for name, label in RESOURCES:
+        if name not in cap["worst"]:
+            continue
+        r, node = cap["worst"][name]
+        pct = min(100.0, r.fraction * 100)
+        amount = sizing._amount(r)
+        if name == "cpu" and cap.get("cpu_range") and cap["cpu_range"]["high"] > r.used:
+            rng = cap["cpu_range"]
+            amount = (f"{rng['low'] / 1000:.1f}–{rng['high'] / 1000:.1f} of "
+                      f"{r.capacity / 1000:.0f} cores")
+        rows.append(f"""
+          <tr><td>{esc(label)}</td>
+              <td class="num">{esc(amount)}</td>
+              <td class="bar-cell"><span class="use-bar" style="--w:{pct:.0f}%"
+                  data-level="{'high' if r.fraction >= TIGHT_ABOVE and name != 'cache'
+                               else 'low' if r.fraction < sizing.SPARE_BELOW else 'mid'}">
+                  </span><span class="num">{pct:.0f}%</span></td>
+              <td class="muted">{esc(node.split('.')[0])}</td></tr>""")
+    forecasts = "".join(
+        f'<li><a href="incidents/{esc(f["id"])}.html">{esc(f["title"])}</a></li>'
+        for f in cap["forecasts"])
+    span = f"{cap['days']:.0f} days" if cap["days"] >= 2 else "the history held"
+    return f"""
+    <h2>Capacity</h2>
+    <p class="capacity-line" data-state="{esc(cap['state'])}">{esc(cap['line'])}</p>
+    {f'<ul class="forecasts">{forecasts}</ul>' if forecasts else ''}
+    <div class="scroll"><table class="capacity">
+      <thead><tr><th>Resource</th><th>Busiest moment</th><th>Of what it has</th>
+        <th>Node</th></tr></thead>
+      <tbody>{''.join(rows)}</tbody></table></div>
+    <p class="aside">The single busiest moment in {esc(span)}, not an average, on whichever
+       member worked hardest.</p>"""
+
+
 def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, older: int,
                  findings: list[dict], chart_file, profile_html: str | None,
-                 muted: set[str], now: datetime, verdict: Verdict) -> str:
+                 muted: set[str], now: datetime, verdict: Verdict,
+                 cap: dict | None = None) -> str:
     """One cluster: what happened to it, newest first, and what normal looks like there."""
     cutoff = int(now.timestamp() * 1000) - WINDOW_DAYS * 86_400_000
     quiet = silent_hours(state, now, summary)
@@ -1180,6 +1303,7 @@ def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, olde
     {found}
     {older_link}
     {muted_note}
+    {capacity_section(cap) if cap else ''}
     {profile}"""
     return layout(f"{cluster_id} · Big Hole", body, "../", now)
 
@@ -1444,7 +1568,8 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
                        float(summary.get("days_of_raw_ftdc") or 0))
     write(site / "index.html",
           page_cluster(cluster_id, summary, state, recent, len(by_moment(list(older))),
-                       findings, chart_file, profile_section(base, now), muted, now, verdict))
+                       findings, chart_file, profile_section(base, now), muted, now, verdict,
+                       capacity(base, summary, findings, now)))
     if older:
         write(site / "history.html", page_history(cluster_id, older, now))
     elif (site / "history.html").exists():

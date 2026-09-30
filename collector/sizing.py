@@ -167,11 +167,18 @@ def resources_for(rows: list[dict], node: str) -> list[Resource]:
     if cache_used is not None and cache_max:
         out.append(Resource("cache", cache_used, cache_max, "bytes"))
 
-    read_out = _peak(rows, "serverStatus.wiredTiger.concurrentTransactions.read.out", node)
-    write_out = _peak(rows, "serverStatus.wiredTiger.concurrentTransactions.write.out", node)
-    pool = _peak(rows, "serverStatus.wiredTiger.concurrentTransactions.read.totalTickets", node)
-    if read_out is not None and pool:
-        out.append(Resource("concurrency", read_out + (write_out or 0.0), pool, "tickets"))
+    # Each pool against its own size, and the fuller of the two. Reads and writes draw from
+    # separate pools; the sum of both against the read pool alone reported 106 of 63 tickets
+    # on a real replica set, which is not a measurement of anything.
+    pools = []
+    for kind in ("read", "write"):
+        used = _peak(rows, f"serverStatus.wiredTiger.concurrentTransactions.{kind}.out", node)
+        size = _peak(rows, f"serverStatus.wiredTiger.concurrentTransactions.{kind}.totalTickets",
+                     node)
+        if used is not None and size:
+            pools.append(Resource("concurrency", used, size, f"{kind} tickets"))
+    if pools:
+        out.append(max(pools, key=lambda r: r.fraction))
 
     current = _peak(rows, "serverStatus.connections.current", node)
     available = _peak(rows, "serverStatus.connections.available", node)
@@ -195,11 +202,15 @@ def advise(baseline_path: Path, nodes: list[dict], had_trouble: bool,
     worst: dict[str, Resource] = {}
     labels = []
     for node in nodes:
-        label = node.get("hostname") or node.get("node")
-        if not label:
+        # The baseline is keyed by the node's directory, which is the hostname on Atlas and
+        # anything at all on a server of your own -- `rs27017` for a member that calls itself
+        # `db1`. Looked up by hostname, every self-managed cluster matched no rows and this
+        # stayed silent without saying why. The hostname is only for the reader.
+        key = node.get("node") or node.get("hostname")
+        if not key:
             continue
-        labels.append(label)
-        for resource in resources_for(rows, label):
+        labels.append(node.get("hostname") or key)
+        for resource in resources_for(rows, key):
             seen = worst.get(resource.name)
             if seen is None or resource.fraction > seen.fraction:
                 worst[resource.name] = resource

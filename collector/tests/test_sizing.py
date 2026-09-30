@@ -87,6 +87,17 @@ def test_it_says_how_much_history_it_speaks_from(tmp_path):
 
 # ------------------------------------------------------------------------ when it stays quiet
 
+def test_a_server_of_your_own_is_found_by_its_directory_not_its_hostname(tmp_path):
+    """Regression: the baseline is keyed by the node's directory. On Atlas that is the hostname;
+    on a server of your own it is whatever the directory is called, and looked up by hostname
+    every self-managed cluster matched nothing and got no advice, silently."""
+    path = baseline(tmp_path, node="rs27017")
+    found = sizing.advise(path, [{"hostname": "db1", "node": "rs27017"}], False, T0,
+                          T0 + 3_600_000)
+    assert len(found) == 1
+    assert found[0]["node"] == "db1", "and the reader still sees the host's own name"
+
+
 def test_too_little_history_says_nothing(tmp_path):
     """Six days has not seen a weekly cycle, so it has not seen the weekly peak."""
     assert advise(baseline(tmp_path, days=6.0)) == []
@@ -157,7 +168,8 @@ def test_the_worst_member_decides(tmp_path):
     path = baseline(tmp_path)
     busy = [json.loads(l) for l in path.read_text().splitlines() if l]
     for row in busy:
-        row["node"] = "n1.mongodb.net"
+        # Keyed by the node's directory, as analyze.py writes it -- not by its hostname.
+        row["node"] = "n1"
         if row["metric"] == "systemMetrics.memory.MemAvailable_kb":
             row["min"] = row["max"] = 0.2 * GB   # this member is nearly out of memory
     with path.open("a") as fh:
@@ -204,3 +216,17 @@ def test_a_cpu_history_that_is_all_artefact_says_nothing(tmp_path):
 
 def _rows(path: Path) -> list[dict]:
     return [json.loads(l) for l in path.read_text().splitlines() if l]
+
+
+def test_each_ticket_pool_is_measured_against_its_own_size(tmp_path):
+    """Regression: reads and writes out, summed, against the read pool alone read 106 of 63."""
+    path = baseline(tmp_path, tickets_out=57, tickets_pool=63)
+    extra = [{"scope": "baseline", "run": "2026-07-01T00:00:00+00:00", "node": NODE,
+              "metric": f"serverStatus.wiredTiger.concurrentTransactions.write.{m}",
+              "min": v, "max": v, "p50": v, "p95": v, "p99": v, "mean": v, "n": 100}
+             for m, v in (("out", 49), ("totalTickets", 63))]
+    with path.open("a") as fh:
+        fh.write("".join(json.dumps(r) + "\n" for r in extra))
+    (tickets,) = [r for r in sizing.resources_for(sizing._rows(path), NODE)
+                  if r.name == "concurrency"]
+    assert (tickets.used, tickets.capacity, tickets.unit) == (57, 63, "read tickets")
