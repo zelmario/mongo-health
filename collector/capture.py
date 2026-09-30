@@ -67,10 +67,11 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
     ftdc = base / "ftdc"
     state = State.load(base / "state.json", cluster_id)
 
-    if spec["source"].get("type") == "mongodb":
-        # Connected by connection string: poller.py writes what the members report as FTDC
-        # under poll/, and from here on it is a directory like any other.
-        source = sources.DirectorySource(base / "poll")
+    if spec["source"].get("type") in ("onprem", "mongodb"):
+        # A server of your own: poller.py writes what the members report as FTDC under
+        # incoming/, uploaded files are unpacked beside it member by member, and from here on
+        # it is a directory like any other.
+        source = sources.DirectorySource(base / "incoming")
     else:
         source = sources.build(spec["source"], pending_job=state.pending_job,
                                job_estimate=state.last_job_seconds)

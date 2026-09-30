@@ -848,6 +848,27 @@ h2 { font-size: 1.0625rem; margin: 2rem 0 0.8rem; }
 """
 
 INCIDENT_CSS = """
+/* Adding a cluster: two doors, then the drop zone for FTDC files. */
+.doors { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1rem;
+         margin-top: 1rem; }
+a.door { display: flex; flex-direction: column; gap: .5rem; padding: 1.4rem 1.3rem;
+         background: var(--panel); border: 1px solid var(--edge); text-decoration: none;
+         color: var(--ink-soft); }
+a.door b { color: var(--ink); font-size: 1.125rem; }
+a.door:hover, a.door:focus-visible { border-color: var(--signal); }
+h2 .optional { font-weight: 400; color: var(--ink-faint); font-size: .875rem; }
+.drop { display: flex; flex-direction: column; gap: .4rem; align-items: center; text-align: center;
+        padding: 1.8rem 1rem; border: 1px dashed var(--edge); color: var(--ink-soft); }
+.drop.over { border-color: var(--signal); background: var(--signal-soft); }
+.drop b { color: var(--ink); }
+.drop input[type=file] { display: none; }
+label.link { display: inline; font-weight: 400; color: var(--signal); text-decoration: underline;
+             cursor: pointer; font-size: inherit; margin: 0; }
+.upload { padding: .7rem 0; border-bottom: 1px solid var(--edge-soft); }
+.upload .use-bar { margin-top: .4rem; }
+.upload ul { margin: .4rem 0 0; padding-left: 1.1rem; font-size: .875rem; color: var(--ink-soft); }
+.upload.failed .meta { color: var(--bad); }
+
 /* The catalog of checks. */
 article.rule { scroll-margin-top: 1rem; }
 article.rule:target { outline: 1px solid var(--signal); }
@@ -965,12 +986,13 @@ CAUSES = {
     "ssh": [
         "the host stopped answering, or the key the collector uses was removed",
     ],
-    "mongodb": [
+    "onprem": [
         "the collector cannot connect: the password changed, the user was dropped, or the "
         "network path to the members is closed",
         "the poller service is not running",
     ],
 }
+CAUSES["mongodb"] = CAUSES["onprem"]  # the name the first version gave this source
 DEFAULT_CAUSES = ["something between the cluster and the collector stopped"]
 
 

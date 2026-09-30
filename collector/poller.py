@@ -5,7 +5,7 @@
 
 For every cluster whose source is `{"type": "mongodb", "uri": "mongodb://..."}`: find its
 members, connect to each directly with the same credentials, and ask it for `getDiagnosticData`
-every ten seconds. The samples are written as FTDC under `data/<cluster>/poll/<member>/`, where
+every ten seconds. The samples are written as FTDC under `data/<cluster>/incoming/<member>/`, where
 the hourly capture picks them up like any directory of FTDC.
 
 One user, created once on the primary, is enough: the replica set replicates it to every member.
@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 import threading
 import time
@@ -36,6 +35,7 @@ from pymongo import uri_parser
 
 import config
 import ftdcwrite
+from ftdcfiles import member_dir
 
 INTERVAL = 10            # seconds between samples, per member
 DISCOVER_EVERY = 300     # seconds between re-reading the member list
@@ -46,12 +46,6 @@ RAW = CodecOptions(document_class=RawBSONDocument)
 # The first chunk of a member's life is written after this many samples instead of the usual
 # five minutes' worth, so the first evaluation of a newly connected cluster waits a minute.
 FIRST_CHUNK = 6
-
-
-def member_dir(host: str) -> str:
-    """A member's directory name. `db1:27017` -> `db1_27017`: the colon is legal on Linux but
-    not everywhere this data may be copied to."""
-    return re.sub(r"[^A-Za-z0-9._-]", "_", host)
 
 
 def client_for(uri: str, host: str | None = None) -> MongoClient:
@@ -166,7 +160,8 @@ class MemberPoller(threading.Thread):
 class ClusterPoller:
     def __init__(self, cluster_id: str, uri: str, data: Path):
         self.cluster_id, self.uri = cluster_id, uri
-        self.base = data / cluster_id / "poll"
+        # Shared with uploaded files for the same members; see ftdcfiles.py.
+        self.base = data / cluster_id / "incoming"
         self.members: dict[str, tuple[MemberPoller, threading.Event]] = {}
         self.status: dict = {}
         self.discovered_at = 0.0
@@ -219,7 +214,7 @@ def targets(config_path: Path) -> dict[str, str]:
     except config.ConfigError:
         return {}
     return {c["cluster_id"]: c["source"]["uri"] for c in clusters
-            if c["source"].get("type") == "mongodb" and c["source"].get("uri")}
+            if c["source"].get("type") in ("onprem", "mongodb") and c["source"].get("uri")}
 
 
 def main() -> int:
