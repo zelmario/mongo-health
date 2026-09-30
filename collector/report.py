@@ -952,10 +952,11 @@ def layout(title: str, body: str, root: str, generated: datetime) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)}</title><style>{CSS}{REPORT_CSS}{INCIDENT_CSS}</style></head>
 <body><div class="wrap">
-<header class="top"><a class="brand" href="{root}index.html">Big Hole</a>
+<header class="top"><a class="brand" href="{root}index.html">mongo-health</a>
   <span>as of {esc(stamp)}</span></header>
 {body}
-<footer>Rebuilt after every collector run. Times are UTC.</footer>
+<footer>Rebuilt after every collector run. Times are UTC. Analysis by
+  <a href="https://github.com/zelmario/Big-hole">Big Hole</a>.</footer>
 </div></body></html>"""
 
 
@@ -1305,7 +1306,7 @@ def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, olde
     {muted_note}
     {capacity_section(cap) if cap else ''}
     {profile}"""
-    return layout(f"{cluster_id} · Big Hole", body, "../", now)
+    return layout(f"{cluster_id} · mongo-health", body, "../", now)
 
 
 def page_history(cluster_id: str, older: list, now: datetime) -> str:
@@ -1333,7 +1334,7 @@ def page_history(cluster_id: str, older: list, now: datetime) -> str:
     <p class="lede">Out of the report, not out of the data: if the same thing happens again it is
        still counted as a repeat.</p>
     {"".join(rows)}"""
-    return layout(f"History · {cluster_id} · Big Hole", body, "../", now)
+    return layout(f"History · {cluster_id} · mongo-health", body, "../", now)
 
 
 def page_incident(cluster_id: str, g, findings: list[dict], chart_file, now: datetime) -> str:
@@ -1459,7 +1460,7 @@ def page_index(rows: list[dict], now: datetime) -> str:
         body = ('<h1>No clusters yet</h1><div class="quiet"><b>Nothing to show</b>'
                 '<p>Add a cluster to <code>config.json</code>, or run <code>onboard.py</code>, '
                 'and it appears here after the next run.</p></div>')
-        return layout("Big Hole", body, "", now)
+        return layout("mongo-health", body, "", now)
 
     items = []
     for r in rows:
@@ -1491,7 +1492,7 @@ def page_index(rows: list[dict], now: datetime) -> str:
     <p class="lede">One answer per cluster, from every check over all the history held.
        Incidents counted over the last {WINDOW_DAYS} days.</p>
     <div class="card">{''.join(items)}</div>"""
-    return layout("Big Hole", body, "", now)
+    return layout("mongo-health", body, "", now)
 
 
 # ------------------------------------------------------------------------------ building

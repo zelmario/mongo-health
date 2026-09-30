@@ -2,7 +2,7 @@
 # when the collector does not, which is the entire point.
 
 [Unit]
-Description=Big Hole collector — notice the collector stopped
+Description=mongo-health — notice the collector stopped
 
 [Service]
 Type=oneshot

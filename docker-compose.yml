@@ -12,7 +12,7 @@
 services:
   collector:
     build: .
-    image: bighole-collector
+    image: mongo-health
     restart: unless-stopped
     env_file:
       - path: .env

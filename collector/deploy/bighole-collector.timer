@@ -13,7 +13,7 @@
 # means a hole nobody asked for and nobody is told about.
 
 [Unit]
-Description=Big Hole Cloud — collection schedule
+Description=mongo-health — collection schedule
 
 [Timer]
 OnCalendar=*-*-* *:05:00

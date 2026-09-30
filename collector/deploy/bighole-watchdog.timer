@@ -2,7 +2,7 @@
 # moment as the thing it watches keeps catching it mid-run.
 
 [Unit]
-Description=Big Hole Cloud — watchdog schedule
+Description=mongo-health — watchdog schedule
 
 [Timer]
 OnCalendar=*-*-* *:35:00

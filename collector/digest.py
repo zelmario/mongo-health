@@ -56,7 +56,7 @@ TEXT = {
     # decisions that between them mean it would never reach anybody. A quiet week is exactly
     # when it is true and exactly when there is room to say it.
     "spare": "And one thing that is not a problem: {what}",
-    "footer": "Big Hole · one note a week, whether or not anything happened.",
+    "footer": "mongo-health · one note a week, whether or not anything happened.",
 }
 
 

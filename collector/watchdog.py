@@ -159,9 +159,9 @@ def check(data: Path, now: datetime, hours: int) -> list[dict]:
 def compose(problems: list[dict], recipients: list[str], sender: str,
             now: datetime) -> EmailMessage:
     worst = problems[0]
-    subject = (f"[collector] {worst['cluster']} has stopped capturing"
+    subject = (f"[mongo-health] {worst['cluster']} has stopped capturing"
                if len(problems) == 1
-               else f"[collector] {len(problems)} clusters have stopped capturing")
+               else f"[mongo-health] {len(problems)} clusters have stopped capturing")
 
     lines = [
         "The collector has not captured for one or more clusters.",

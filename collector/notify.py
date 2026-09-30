@@ -61,7 +61,7 @@ TEXT = {
     "episodes": "Episodes",
     "check": "What to check",
     "history_note": "You have {days} days of history for this cluster. Atlas keeps about {atlas}.",
-    "footer": "Big Hole · you are receiving this because this cluster is being monitored.",
+    "footer": "mongo-health · you are receiving this because this cluster is being monitored.",
     "no_chart": "This finding is the absence of data, not a value — there is no series to plot.",
 }
 
@@ -520,7 +520,7 @@ def notify_cluster(spec: dict, root: Path, outbox: Path, send: bool,
 
     work = outbox / cluster_id
     work.mkdir(parents=True, exist_ok=True)
-    sender = (smtp or {}).get("from", "bighole@localhost")
+    sender = (smtp or {}).get("from", "mongo-health@localhost")
     # Every finding on record, not just the pending ones: the resize that explains tonight's
     # incident was written days ago and stopped being pending the moment it was read past.
     everything = [json.loads(line)

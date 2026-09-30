@@ -4,7 +4,7 @@
 # that `systemctl status` answers "is this working" without anybody grepping a log file.
 
 [Unit]
-Description=Big Hole collector — collect and analyse
+Description=mongo-health — collect and analyse
 After=network-online.target
 
 [Service]

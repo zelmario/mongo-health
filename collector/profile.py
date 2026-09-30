@@ -70,7 +70,7 @@ TEXT = {
     "peak": "Worst seen",
     # No header for the reading: it is no longer a column. It is the sentence under each row's
     # numbers, and a heading over a full-width line of prose labels the obvious.
-    "footer": "Generated {when} · Big Hole",
+    "footer": "Generated {when} · mongo-health",
 }
 
 

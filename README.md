@@ -1,6 +1,7 @@
-# Big Hole collector
+# mongo-health
 
-Keeps your MongoDB FTDC past Atlas's 3–10 day retention, watches it with the Big Hole rules,
+Is my MongoDB cluster healthy? Keeps your FTDC past Atlas's 3–10 day retention, checks it with
+the [Big Hole](https://github.com/zelmario/Big-hole) rules,
 and emails you when something happens.
 
 Work in progress: the README, configuration and packaging are being rewritten for the first
