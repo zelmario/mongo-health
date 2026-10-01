@@ -41,7 +41,7 @@ from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import config
 import ftdcfiles
@@ -474,8 +474,10 @@ def atlas_page(error: str = "", env_keys: bool = False) -> str:
 
 
 # How a DBA packs a member's files, on the member. Read-only, one-off, nothing left behind.
-PACK = """sudo tar czf "$(hostname)-ftdc.tgz" -C /var/lib/mongo diagnostic.data
-# dbPath elsewhere?  grep dbPath /etc/mongod.conf   (Ubuntu: /var/lib/mongodb)"""
+PACK = """sudo tar czf "$(hostname)-ftdc.tgz" -C /var/lib/mongo diagnostic.data \\
+    -C /var/log/mongodb mongod.log
+# dbPath elsewhere?  grep dbPath /etc/mongod.conf   (Ubuntu: /var/lib/mongodb)
+# log elsewhere?     grep -A3 systemLog /etc/mongod.conf  (RHEL: /var/log/mongo)"""
 
 
 def drop_zone() -> str:
@@ -487,9 +489,11 @@ def drop_zone() -> str:
           <b>Drop FTDC files here</b>
           <span>A .tar.gz, .tgz, .tar or .zip of each member's <code>diagnostic.data</code> —
             one member or all of them, in one archive or several — or
-            <label for="file" class="link">choose them</label>.</span>
+            <label for="file" class="link">choose them</label>. Add the member's
+            <code>mongod.log</code> too, in the archive or on its own, and each incident says
+            which queries were slow while it happened.</span>
           <input id="file" type="file" multiple
-                 accept=".gz,.tgz,.tar,.zip,application/gzip,application/zip">
+                 accept=".gz,.tgz,.tar,.zip,.log,application/gzip,application/zip,text/plain">
         </div>
         <div id="uploads"></div>
         <p class="hint">On each member, as a user that can read mongod's files:</p>
@@ -636,10 +640,18 @@ UPLOAD_JS = r"""
         return;
       }
       row.querySelector('.use-bar').remove();
-      row.querySelector('.meta').textContent = r.members.length + ' member(s) found';
+      const logs = r.logs || [];
+      row.querySelector('.meta').textContent = r.members.length + ' member(s) found' +
+        (logs.length ? ', ' + logs.length + ' log(s)' : '');
       const ul = document.createElement('ul');
       ul.innerHTML = r.members.map((m) => '<li><code>' + esc(m.member) + '</code> — ' + esc(m.from) +
-        ' to ' + esc(m.to) + ', ' + m.files + ' file(s), ' + m.mb + ' MB</li>').join('');
+        ' to ' + esc(m.to) + ', ' + m.files + ' file(s), ' + m.mb + ' MB</li>').join('') +
+        logs.map((g) => g.member
+          ? '<li>log <code>' + esc(g.log) + '</code> for <code>' + esc(g.member) + '</code> — ' +
+            g.slow + ' slow queries' + (g.from ? ', ' + esc(g.from) + ' to ' + esc(g.to) : '') + '</li>'
+          : '<li class="failed">log <code>' + esc(g.log) + '</code>: which member it is from ' +
+            'cannot be told (it starts after mongod did); upload it in one archive with that ' +
+            'member\'s diagnostic.data</li>').join('');
       row.appendChild(ul);
       const token = document.createElement('input');
       token.type = 'hidden'; token.name = 'upload'; token.value = r.token;
@@ -961,22 +973,34 @@ class Handler(SimpleHTTPRequestHandler):
                 out.write(block)
                 left -= len(block)
         try:
-            members = ftdcfiles.receive(archive, staging)
+            # The name it was dropped with, for what the page says back; never used as a path.
+            dropped = re.sub(r"[^A-Za-z0-9._-]", "_",
+                             unquote(self.headers.get("X-Filename") or ""))[-80:] or None
+            members = ftdcfiles.receive(archive, staging, dropped)
         except Exception as e:
             shutil.rmtree(staging, ignore_errors=True)
             return answer({"error": str(e)}, 400)
         finally:
             archive.unlink(missing_ok=True)
+        day = lambda ms: datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%d %b %Y")  # noqa: E731
         return answer({"token": token, "members": [
             {"member": m["member"], "files": m["files"], "mb": round(m["bytes"] / 1048576),
-             "from": f"{m['from']:%d %b %Y}", "to": f"{m['to']:%d %b %Y}"} for m in members]})
+             "from": f"{m['from']:%d %b %Y}", "to": f"{m['to']:%d %b %Y}"} for m in members],
+            "logs": [{"log": g["log"], "member": g["member"], "slow": g["slow"],
+                      "from": day(g["from"]) if g["from"] else None,
+                      "to": day(g["to"]) if g["to"] else None}
+                     for g in ftdcfiles.received_logs(staging)]})
 
     def _uploads(self, tokens: list[str]) -> list[dict]:
-        """What the tokens on the form stand for, ignoring any that are not ours."""
+        """What the tokens on the form stand for, ignoring any that are not ours. A token that
+        brought only mongod logs shows up as {"token", "member", "log": True}."""
         found = []
         for token in tokens:
             if not re.fullmatch(r"[0-9a-f]{24}", token):
                 continue
+            for g in ftdcfiles.received_logs(self._staging(token)):
+                if g["member"]:
+                    found.append({"token": token, "member": g["member"], "log": True})
             members = self._staging(token) / "members"
             for m in (members.iterdir() if members.exists() else []):
                 files = [f for f in m.iterdir() if f.is_file()]
@@ -1001,7 +1025,9 @@ class Handler(SimpleHTTPRequestHandler):
                             "uploading."), 400)
         base = self.app.data / cluster_id
         held = ftdcfiles.members_of(base)
-        unknown = sorted({u["member"] for u in uploads} - held)
+        # Only FTDC members are compared: a log names its member by host, the FTDC directories
+        # by the name the replica set gives it, and the two rarely look alike.
+        unknown = sorted({u["member"] for u in uploads if not u.get("log")} - held)
         # A cluster with no members yet has nothing to be mixed up with.
         if held and unknown and confirm != cluster_id:
             return self._html(more_files_page(cluster_id, unknown=unknown,
@@ -1019,14 +1045,16 @@ class Handler(SimpleHTTPRequestHandler):
             again = lambda msg: self._html(onprem_page(msg, cluster_id, uri, retention), 400)  # noqa: E731
         if not config.CLUSTER_ID.match(cluster_id):
             return again("A name is letters, digits, dots, dashes or underscores.")
-        uploads = self._uploads(tokens)
+        uploads = [u for u in self._uploads(tokens) if not u.get("log")]
         if origin == "files" and not uploads:
-            return again("Drop at least one FTDC archive, and wait for it to finish uploading.")
+            return again("Drop at least one FTDC archive, and wait for it to finish uploading. "
+                         "A mongod log can come with it, not instead of it.")
         if not uri and not uploads:
             return again("Give it a connection string, some FTDC files, or both.")
         if uri and not uri.startswith(("mongodb://", "mongodb+srv://")):
             return again("A connection string starts with mongodb:// or mongodb+srv://.")
-        pending = {"id": cluster_id, "uri": uri, "uploads": sorted({u["token"] for u in uploads}),
+        pending = {"id": cluster_id, "uri": uri,
+                   "uploads": sorted({u["token"] for u in self._uploads(tokens)}),
                    "retention_days": retention}
         if not uri:
             return self._finish(pending)

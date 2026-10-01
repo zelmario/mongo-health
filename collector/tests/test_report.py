@@ -515,3 +515,39 @@ def test_two_rebuilds_at_once_do_not_fail_over_each_others_deletions(tmp_path):
         w.join()
     assert not errors
     assert not list(charts.glob("stale*.png"))
+
+
+# ------------------------------------------------------------------------- the log, beside
+
+def hold_log(data: Path, member: str, *starts: datetime):
+    import tests.test_logsummary as tl
+    host = tl.line("2026-08-01T00:00:00.000+00:00", {"host": f"{member}.example.net",
+                                                     "port": 27017}, 4615611, "MongoDB starting")
+    lines = [host] + [tl.scan(t.isoformat()) for t in starts]
+    log = data.parent / f"{member}.log"
+    log.write_text("\n".join(lines) + "\n")
+    report.logsummary.store(report.logsummary.summarize(log), data / "prod" / "logs", log.name)
+
+
+def test_an_incident_names_the_slow_queries_of_its_members(tmp_path):
+    at = datetime.fromtimestamp((MS - 2 * DAY) / 1000, timezone.utc)
+    spec = cluster(tmp_path / "data", [finding("a", node="n0")])
+    hold_log(tmp_path / "data", "n0", at + timedelta(minutes=5), at + timedelta(minutes=6))
+    hold_log(tmp_path / "data", "n9", at + timedelta(minutes=5))
+    page = (build(tmp_path, [spec]) / "prod" / "incidents" / "a.html").read_text()
+    assert "What the log says" in page and "<code>shop.orders</code>" in page
+    assert '<b class="collscan">COLLSCAN</b>' in page and "{status, total ($gt)}" in page
+    assert "n9" not in page.split("What the log says")[1].split("</table>")[0], "its members only"
+
+
+def test_without_a_log_an_uploaded_cluster_is_told_how_to_add_one(tmp_path):
+    spec = dict(cluster(tmp_path / "data", [finding("a")]), source={"type": "onprem"})
+    page = (build(tmp_path, [spec]) / "prod" / "incidents" / "a.html").read_text()
+    assert "No mongod log held" in page and 'href="../../files/prod"' in page
+
+
+def test_a_log_that_misses_the_window_says_so(tmp_path):
+    spec = cluster(tmp_path / "data", [finding("a", node="n0")])
+    hold_log(tmp_path / "data", "n0", datetime(2026, 8, 1, tzinfo=timezone.utc))
+    page = (build(tmp_path, [spec]) / "prod" / "incidents" / "a.html").read_text()
+    assert "does not cover this window" in page

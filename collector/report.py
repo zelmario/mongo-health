@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import config
+import logsummary
 import profile as profile_report
 # For the human names of the metrics a projection can be made about.
 import runway
@@ -876,6 +877,9 @@ img.shape { cursor: zoom-in; }
               border-left: 2px solid var(--signal); color: var(--signal);
               font-size: 0.8125rem; font-weight: 600; }
 .recurrence a { color: var(--ink); margin-left: .3rem; }
+.logq td, .logq th { font-size: .8125rem; white-space: nowrap; }
+.logq td code { white-space: normal; word-break: break-word; }
+.logq .collscan { color: var(--bad); }
 .tod { margin: .4rem 0 .8rem; max-width: 40rem; }
 .tod figcaption { font-size: .8125rem; color: var(--ink-faint); }
 .tod svg { width: 100%; height: auto; display: block; }
@@ -1837,8 +1841,65 @@ def page_history(cluster_id: str, older: list, fixed: list, now: datetime) -> st
     return layout(f"History · {cluster_id} · mongo-health", body, "../", now)
 
 
+LOG_ROWS = 8
+
+
+def log_section(g, logs: list[dict] | None, add_files: str | None) -> str:
+    """The slow queries mongod logged on the affected members while this happened.
+
+    FTDC says that something scanned; the log says which query, on which collection, with
+    which plan -- which is the difference between "an index is missing" and which one. Said
+    plainly when there is no log, or when the one held does not cover this window, so an empty
+    table is never mistaken for "no slow queries".
+    """
+    members = {m for m in (logsummary.short_host(n) for n in g.nodes) if m}
+    mine = [s for s in logs or [] if s.get("member") in members]
+    if not mine:
+        if add_files is None:
+            return ""
+        return (f'<h2>What the log says</h2><p class="lede">No mongod log held for '
+                f'{esc(name_nodes(g.nodes))}. With it, this would name the queries that were '
+                f'slow while it happened. <a class="needs-server" href="{esc(add_files)}">Add '
+                f'it with the FTDC</a>.</p>')
+    covered = [s for s in mine if s.get("first") is not None and s["first"] <= g.to_ms
+               and s["last"] >= g.from_ms - 60_000]
+    if not covered:
+        return ('<h2>What the log says</h2><p class="lede">The log held for these members '
+                'does not cover this window.</p>')
+    rows = logsummary.during(covered, members, g.from_ms, g.to_ms)
+    if not rows:
+        return ('<h2>What the log says</h2><p class="lede">No slow query in the log for this '
+                'window. mongod logs a query when it takes longer than slowms, 100 ms unless it '
+                'was changed, so faster ones are not here.</p>')
+    body = []
+    for r in rows[:LOG_ROWS]:
+        per = lambda v: f"{v / r['n']:,.0f}" if r["n"] else "0"  # noqa: E731
+        plan = (f'<b class="collscan">{esc(r["plan"])}</b>' if r["plan"].startswith("COLLSCAN")
+                else esc(r["plan"]))
+        source = ", ".join(sorted(r["apps"]) + [f"read {m}" for m in sorted(r["rp"])])
+        body.append(
+            f'<tr><td class="muted">{esc(r["member"])}</td><td><code>{esc(r["ns"])}</code></td>'
+            f'<td>{esc(r["op"])}</td><td><code>{esc(r["shape"] or "—")}</code></td>'
+            f'<td>{plan}</td><td class="num">{r["n"]:,}</td><td class="num">{per(r["docs"])}</td>'
+            f'<td class="num">{per(r["ret"])}</td><td class="num">{r["maxms"]:,} ms</td>'
+            f'<td class="muted">{esc(source or "—")}</td></tr>')
+    more = (f'<p class="hint">And {len(rows) - LOG_ROWS} more shapes, smaller.</p>'
+            if len(rows) > LOG_ROWS else "")
+    return f"""
+          <h2>What the log says</h2>
+          <p class="lede">Slow queries mongod logged on {esc(name_nodes(g.nodes))} during this,
+            costliest first. Field names only: the values in the filters are never kept.</p>
+          <div class="scroll"><table class="logq">
+            <thead><tr><th>Node</th><th>Collection</th><th>Operation</th><th>Filter</th>
+              <th>Plan</th><th>Times</th><th>Examined each</th><th>Returned each</th>
+              <th>Slowest</th><th>From</th></tr></thead>
+            <tbody>{''.join(body)}</tbody></table></div>
+          {more}"""
+
+
 def page_incident(cluster_id: str, g, findings: list[dict], chart_file, now: datetime,
-                  resolution: dict | None = None) -> str:
+                  resolution: dict | None = None, logs: list[dict] | None = None,
+                  add_files: str | None = None) -> str:
     """One incident in full.
 
     Every member gets its own chart, which answers the question the summary cannot: was this
@@ -1963,6 +2024,7 @@ def page_incident(cluster_id: str, g, findings: list[dict], chart_file, now: dat
           <p class="lede">One chart per member. If only one moved, the cause is on that host; if
             all of them did, it is the workload or something they share.</p>
           {''.join(charts)}
+          {log_section(g, logs, add_files)}
         </div>
       </li>
     </ol>
@@ -2176,11 +2238,15 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
     elif (site / "history.html").exists():
         (site / "history.html").unlink(missing_ok=True)
 
+    logs = logsummary.held(base / "logs")
+    add_files = (f"../../files/{cluster_id}"
+                 if (spec.get("source") or {}).get("type") == "onprem" else None)
     pages: set[str] = set()
     for g in groups:
         page = f"{g.worst['id']}.html"
         write(site / "incidents" / page, page_incident(cluster_id, g, findings, chart_file, now,
-                                                        resolutions.is_resolved(g, done)))
+                                                        resolutions.is_resolved(g, done),
+                                                        logs=logs, add_files=add_files))
         pages.add(page)
         for m in g.members:
             if f"{m['id']}.html" not in pages:

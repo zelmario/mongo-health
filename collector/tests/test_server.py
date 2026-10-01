@@ -203,7 +203,7 @@ def test_something_that_is_not_ftdc_is_explained(running):
     junk = running["tmp"] / "notes.txt"
     junk.write_text("not a capture")
     status, body = upload(running, junk)
-    assert status == 400 and "neither an archive nor an FTDC file" in body["error"]
+    assert status == 400 and "neither an archive, an FTDC file nor a mongod log" in body["error"]
 
 
 def test_an_upload_from_another_site_is_refused(running):
@@ -695,3 +695,52 @@ def test_a_second_upload_takes_what_the_open_file_gained(tmp_path):
     assert sizes == {"metrics.2026-08-01T00-00-00Z-00000": 10,      # a shorter copy: kept ours
                      "metrics.2026-08-02T00-00-00Z-00000": 20,      # it grew: taken
                      "metrics.interim": 3}                          # always the newest
+
+
+# ------------------------------------------------------------------------ mongod logs
+
+def ftdc_and_log_archive(tmp: Path, rotated: bool = False) -> Path:
+    """One member's diagnostic.data with its mongod.log beside it, the way PACK makes it."""
+    import tarfile
+    import tests.test_logsummary as tl
+    archive = ftdc_archive(tmp, members=("db1:27017",))
+    with tarfile.open(archive) as t:
+        t.extractall(tmp / "x")
+    member = tmp / "x" / "backup" / "whatever0"
+    lines = ([] if rotated else [tl.STARTING]) + [tl.scan("2026-08-01T00:00:20.000+00:00")]
+    (member / "mongod.log").write_text("\n".join(lines) + "\n")
+    out = tmp / "with-log.tar.gz"
+    with tarfile.open(out, "w:gz") as t:
+        t.add(tmp / "x" / "backup", arcname="backup")
+    return out
+
+
+def test_a_log_in_the_archive_is_read_for_its_member(running):
+    status, r = upload(running, ftdc_and_log_archive(running["tmp"]))
+    assert status == 200 and r["logs"][0]["member"] == "db1" and r["logs"][0]["slow"] == 1
+
+
+def test_a_rotated_log_takes_its_member_from_the_ftdc_beside_it(running):
+    status, r = upload(running, ftdc_and_log_archive(running["tmp"], rotated=True))
+    assert r["logs"][0]["member"] == "db1"
+
+
+def test_a_log_alone_can_be_added_to_a_cluster_that_exists(running):
+    base = onprem_cluster(running)
+    import tests.test_logsummary as tl
+    log = running["tmp"] / "mongod.log"
+    log.write_text(tl.STARTING + "\n" + tl.scan("2026-08-01T00:00:20.000+00:00") + "\n")
+    status, r = upload(running, log)
+    assert status == 200 and r["members"] == [] and r["logs"][0]["member"] == "db1"
+    assert r["logs"][0]["log"] == "mongod.log", "the name it was dropped with"
+    assert post(running, "/files/orders", {"upload": r["token"]})[0] == 303
+    assert list((base / "logs" / "db1").glob("*.json"))
+
+
+def test_a_new_cluster_needs_its_ftdc_not_just_a_log(running):
+    import tests.test_logsummary as tl
+    log = running["tmp"] / "mongod.log"
+    log.write_text(tl.STARTING + "\n")
+    token = upload(running, log)[1]["token"]
+    status, _, body = post(running, "/add/onprem", {"id": "x", "upload": token, "from": "files"})
+    assert status == 400 and "not instead of it" in body

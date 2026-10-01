@@ -13,6 +13,7 @@ A standalone falls back to the host name and port in the file's metadata.
 """
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import struct
@@ -24,6 +25,7 @@ from pathlib import Path
 
 import bson
 
+import logsummary
 import sources
 
 
@@ -79,7 +81,7 @@ def describe(path: Path) -> dict:
     return {"member": member, "from": first, "to": last}
 
 
-def _unpack(archive: Path, into: Path) -> None:
+def _unpack(archive: Path, into: Path, name: str | None = None) -> None:
     """Whatever arrived, as files under `into`: a zip, a tar in any compression, or a single
     FTDC file. Nothing is allowed to land outside `into`."""
     into.mkdir(parents=True, exist_ok=True)
@@ -99,21 +101,70 @@ def _unpack(archive: Path, into: Path) -> None:
         with tarfile.open(archive) as t:
             sources.extract(t, into)
         return
-    # Not an archive: a bare metrics file, if it reads as one.
+    # Not an archive: a bare mongod log, gzipped or not, or a bare metrics file.
+    if logsummary.is_log(archive):
+        shutil.copy(archive, into / (name or "uploaded.log"))
+        return
     if describe(archive)["from"] is None:
-        raise ValueError("this is neither an archive nor an FTDC file")
+        raise ValueError("this is neither an archive, an FTDC file nor a mongod log")
     shutil.copy(archive, into / "metrics.uploaded-00000")
 
 
-def receive(archive: Path, staging: Path) -> list[dict]:
-    """Unpack an upload into `staging/<member>/`, and say what was found, member by member."""
+def host_of(path: Path) -> str | None:
+    """The short host name in an FTDC file's metadata, which is how findings name a member."""
+    for doc in _documents(path):
+        if doc.get("type") == 0:
+            host = (((doc.get("doc") or {}).get("hostInfo") or {}).get("system") or {}).get(
+                "hostname")
+            return logsummary.short_host(host)
+    return None
+
+
+def receive_logs(raw: Path, staging: Path, ftdc: list[Path]) -> list[dict]:
+    """Summarise every mongod log in the upload into `staging/logs/<member>/`.
+
+    The member comes from the log's own "MongoDB starting" line; a rotated log has none, and
+    then from the FTDC beside it in the same folder, or from the only member the upload holds.
+    A log whose member cannot be told is said so and not kept: attached to the wrong member it
+    would name the wrong queries.
+    """
+    hosts_by_dir: dict[Path, str] = {}
+    for f in ftdc:
+        if f.parent not in hosts_by_dir and (h := host_of(f)):
+            hosts_by_dir[f.parent] = h
+    only = next(iter(set(hosts_by_dir.values()))) if len(set(hosts_by_dir.values())) == 1 else None
+    out = []
+    for path in sorted(p for p in raw.rglob("*") if p.is_file() and not p.name.startswith("metrics.")):
+        if not logsummary.is_log(path):
+            continue
+        summary = logsummary.summarize(path)
+        if summary["member"] is None:
+            near = [h for d, h in hosts_by_dir.items() if d.parent == path.parent
+                    or d.parent.parent == path.parent.parent]
+            summary["member"] = near[0] if len(set(near)) == 1 else only
+        entry = {"log": path.name, "member": summary["member"], "slow": summary["slow"],
+                 "from": summary["first"], "to": summary["last"]}
+        if summary["member"] and summary["first"] is not None:
+            logsummary.store(summary, staging / "logs", path.name)
+        out.append(entry)
+    return out
+
+
+def receive(archive: Path, staging: Path, name: str | None = None) -> list[dict]:
+    """Unpack an upload into `staging/<member>/`, and say what was found, member by member.
+
+    mongod logs in it are summarised beside the FTDC (see `receive_logs`) and reported in
+    `staging/logs.json`; an upload may be logs alone, for a cluster that has the FTDC already.
+    """
     raw = staging / "raw"
-    _unpack(archive, raw)
+    _unpack(archive, raw, name if name and not name.startswith("metrics.") else None)
     found: dict[str, dict] = {}
     files = [p for p in raw.rglob("metrics.*") if p.is_file()]
-    if not files:
-        raise ValueError("no FTDC files in it — it needs the metrics.* files from a "
-                         "diagnostic.data directory")
+    logs = receive_logs(raw, staging, files)
+    (staging / "logs.json").write_text(json.dumps(logs))
+    if not files and not logs:
+        raise ValueError("no FTDC files or mongod logs in it — it needs the metrics.* files "
+                         "from a diagnostic.data directory, or a mongod.log")
     for path in files:
         info = describe(path)
         if info["from"] is None:
@@ -133,9 +184,16 @@ def receive(archive: Path, staging: Path) -> list[dict]:
         entry["from"] = min(entry["from"], info["from"])
         entry["to"] = max(entry["to"], info["to"])
     shutil.rmtree(raw, ignore_errors=True)
-    if not found:
+    if files and not found:
         raise ValueError("the metrics files in it could not be read as FTDC")
     return sorted(found.values(), key=lambda e: e["member"])
+
+
+def received_logs(staging: Path) -> list[dict]:
+    try:
+        return json.loads((staging / "logs.json").read_text())
+    except (OSError, ValueError):
+        return []
 
 
 def adopt(staging: Path, incoming: Path) -> None:
@@ -155,6 +213,12 @@ def adopt(staging: Path, incoming: Path) -> None:
             if (not dest.exists() or f.name == "metrics.interim"
                     or f.stat().st_size > dest.stat().st_size):
                 shutil.move(str(f), dest)
+    # The log summaries go beside the cluster's findings, not into incoming/: they are not FTDC,
+    # and the capture would only have to skip them.
+    for summary in (staging / "logs").glob("*/*.json") if (staging / "logs").is_dir() else []:
+        dest = incoming.parent / "logs" / summary.parent.name / summary.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(summary), dest)
     shutil.rmtree(staging, ignore_errors=True)
 
 
