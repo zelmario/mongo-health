@@ -489,3 +489,29 @@ def test_a_charts_spread_inside_each_bucket_is_drawn(tmp_path):
                                     f["rule"], f["metric"], window=(f["fromMs"], f["toMs"]))
     assert with_band and without and with_band != without
     assert report.chart_name(f) != report.chart_name(plain), "a new picture, a new file"
+
+
+def test_two_rebuilds_at_once_do_not_fail_over_each_others_deletions(tmp_path):
+    """The page and the collector rebuild the site together at start-up; one used to die
+    removing a stale chart the other had already removed."""
+    import threading
+    spec = cluster(tmp_path / "data", [finding(f"f{i}", at=MS - i * DAY) for i in range(6)])
+    build(tmp_path, [spec])
+    charts = tmp_path / "site" / "prod" / "charts"
+    for i in range(40):
+        (charts / f"stale{i}.png").write_bytes(b"x")
+    errors = []
+
+    def rebuild():
+        try:
+            report.build([spec], tmp_path / "data", tmp_path / "site", NOW)
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    workers = [threading.Thread(target=rebuild) for _ in range(4)]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+    assert not errors
+    assert not list(charts.glob("stale*.png"))

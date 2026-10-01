@@ -326,3 +326,41 @@ def test_a_missing_runner_is_named(tmp_path: Path, monkeypatch):
         assert "nowhere.ts" in str(e)
     else:
         raise AssertionError("expected FileNotFoundError")
+
+
+# ------------------------------------------------------------------- redrawn by a re-analysis
+
+def test_a_reanalysis_redraws_the_charts_of_findings_it_already_holds(tmp_path, monkeypatch):
+    """Otherwise an improvement to the charts reached only incidents found after it."""
+    spec = setup(tmp_path)
+    old = dict(a_finding(), chart={"t": [1], "v": [5.0]})
+    stub_engine(monkeypatch, engine_output(findings=[old]))
+    analyze_cluster(spec, tmp_path / "data", verbose=False)
+    path = tmp_path / "data/prod/findings.jsonl"
+    first = json.loads(path.read_text().splitlines()[0])
+    rows = [dict(first, notified_at="2026-08-07T03:00:00+00:00")]
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+    new = dict(a_finding(), chart={"t": [1], "v": [5.0], "series": [{"lo": [0.0]}]})
+    stub_engine(monkeypatch, engine_output(findings=[new]))
+    analyze_cluster(spec, tmp_path / "data", redo=True, verbose=False)
+    held = [json.loads(line) for line in path.read_text().splitlines()]
+    assert len(held) == 1, "the same incident, not a second one"
+    assert held[0]["chart"]["series"][0]["lo"] == [0.0]
+    assert held[0]["notified_at"] == "2026-08-07T03:00:00+00:00", "and never sent again"
+    assert held[0]["detected_at"] == first["detected_at"]
+
+
+def test_a_routine_run_leaves_held_charts_alone(tmp_path, monkeypatch):
+    spec = setup(tmp_path)
+    stub_engine(monkeypatch, engine_output(findings=[dict(a_finding(), chart={"v": [1.0]})]))
+    analyze_cluster(spec, tmp_path / "data", verbose=False)
+    from state import State
+    state = State.load(tmp_path / "data/prod/state.json", "prod")
+    state.record("n0", "metrics.2026-08-07T02-00-00Z-00000", 1)
+    state.save(tmp_path / "data/prod/state.json")
+    (tmp_path / "data/prod/ftdc/n0/metrics.2026-08-07T02-00-00Z-00000").write_bytes(b"x")
+    stub_engine(monkeypatch, engine_output(findings=[dict(a_finding(), chart={"v": [2.0]})]))
+    analyze_cluster(spec, tmp_path / "data", verbose=False)
+    held = [json.loads(line) for line in (tmp_path / "data/prod/findings.jsonl").read_text().splitlines()]
+    assert held[0]["chart"] == {"v": [1.0]}

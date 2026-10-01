@@ -150,6 +150,20 @@ def finding_id(cluster_id: str, f: dict) -> str:
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
+def refresh_charts(path: Path, charts: dict[str, dict]) -> None:
+    """The chart of findings already held, redrawn by a re-analysis. Nothing else changes --
+    not when it was detected, not whether it was sent -- so a better picture of an old incident
+    never becomes a second email about it. Without this, a finding kept the chart the engine
+    drew the day it was found, and an improvement to the charts reached only new incidents."""
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    for row in rows:
+        if row.get("id") in charts:
+            row["chart"] = charts[row["id"]]
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+    tmp.replace(path)
+
+
 def append(path: Path, rows: list[dict]) -> None:
     if not rows:
         return
@@ -263,12 +277,15 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
     # --- findings, only the ones not seen before ------------------------------------
     already = set(state.reported_findings)
     fresh = []
+    redrawn: dict[str, dict] = {}
     for f in (out["findings"]
               + anomaly.as_findings(excursions, window_from, window_to, nodes)
               + advice
               + ahead):
         fid = finding_id(cluster_id, f)
         if fid in already:
+            if redo and f.get("chart"):
+                redrawn[fid] = f["chart"]
             continue
         fresh.append({
             "id": fid,
@@ -279,6 +296,8 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
         })
     append(base / "findings.jsonl", fresh)
     state.reported_findings.extend(f["id"] for f in fresh)
+    if redrawn:
+        refresh_charts(base / "findings.jsonl", redrawn)
 
     # --- baseline: one row per metric per run ---------------------------------------
     # Two scopes, kept apart because they answer different questions. `baseline` covers

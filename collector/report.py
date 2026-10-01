@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import secrets
 import re
 import sys
 from datetime import datetime, timezone
@@ -1204,7 +1205,7 @@ def draw_chart(finding: dict, charts: Path) -> str | None:
         if png is None:
             return None
         charts.mkdir(parents=True, exist_ok=True)
-        tmp = charts / f".{name}.tmp"
+        tmp = charts / f".{name}.{secrets.token_hex(4)}.tmp"
         tmp.write_bytes(png)
         tmp.replace(path)      # atomic: a reader never gets half a picture
     return name
@@ -2105,7 +2106,9 @@ def profile_section(base: Path, now: datetime) -> str | None:
 
 def write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
+    # Named per write: the page and the collector both rebuild the site, at start-up at the
+    # same moment, and a shared temporary name let one move the other's half-written file.
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
     tmp.write_text(text)
     tmp.replace(path)
 
@@ -2166,7 +2169,7 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
     if older or fixed:
         write(site / "history.html", page_history(cluster_id, older, fixed, now))
     elif (site / "history.html").exists():
-        (site / "history.html").unlink()
+        (site / "history.html").unlink(missing_ok=True)
 
     pages: set[str] = set()
     for g in groups:
@@ -2181,12 +2184,14 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
 
     # What the rebuild no longer references goes, so the site does not grow for ever with
     # pictures of findings that were re-analysed into different ones.
+    # missing_ok: the other process rebuilding the site may have removed it first, and a rebuild
+    # that dies over a file already gone left the report step failed for the round.
     for stale in (charts.glob("*.png") if charts.exists() else []):
         if stale.name not in drawn:
-            stale.unlink()
+            stale.unlink(missing_ok=True)
     for stale in ((site / "incidents").glob("*.html") if (site / "incidents").exists() else []):
         if stale.name not in pages:
-            stale.unlink()
+            stale.unlink(missing_ok=True)
 
     return {
         "id": cluster_id,
