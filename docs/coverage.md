@@ -123,8 +123,16 @@ queries.
 - **Data:** `serverStatus.asserts.user`.
 - **Measured:** Cluster1 sits at about 9/s at p99, steadily (its own background traffic);
   rs-local spiked to 11,257/s.
-- **Proposal:** against the cluster's own history (a baseline excursion), never a fixed number —
-  the steady level differs by two orders of magnitude between the two.
+- **Tried, and the baseline excursion does not work here.** Replayed run by run over both
+  histories it reports nothing at all: errors come in bursts of minutes (5,453/s on rs-local on
+  17 August, inside an hour whose p95 was 1), and the hourly p95 the baseline keeps cannot see
+  them; and the first hour on record (1,335/s) set a ceiling nothing crossed again.
+- **What a threshold would look like:** ≥ 100/s held for 30 s happens on rs-local only in six
+  bursts on 9 August, before any recorded scenario, so their cause is unknown; Cluster1 never
+  holds even 20/s for 10 s. No injected scenario produces sustained user asserts, so there is
+  nothing to calibrate the firing side against.
+- **Open:** inject what really causes them — clients with a wrong password after a rotation, a
+  duplicate-key storm from a retried insert — and calibrate on that.
 
 ### Lower priority — the data is quirky or the trouble is rare
 
