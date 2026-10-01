@@ -925,7 +925,7 @@ img.shape { cursor: zoom-in; }
 .aside { margin: 1rem 0 0; font-size: .875rem; }
 .aside a { color: var(--ink-soft); }
 .keep { margin: 3rem 0 0; font-size: .875rem; color: var(--ink-soft); }
-.keep + .remove { margin-top: .6rem; padding-top: 0; border-top: none; }
+.keep + .remove, .keep + .keep { margin-top: .6rem; padding-top: 0; border-top: none; }
 .remove { margin: 3rem 0 0; padding-top: 1rem; border-top: 1px solid var(--edge-soft);
           font-size: .875rem; }
 .remove a { color: var(--bad); }
@@ -978,6 +978,7 @@ a.door { display: flex; flex-direction: column; gap: .5rem; padding: 1.4rem 1.3r
          color: var(--ink-soft); }
 a.door b { color: var(--ink); font-size: 1.125rem; }
 a.door:hover, a.door:focus-visible { border-color: var(--signal); }
+a.door.recommended { border-left: 3px solid var(--signal); }
 h2 .optional { font-weight: 400; color: var(--ink-faint); font-size: .875rem; }
 .drop { display: flex; flex-direction: column; gap: .4rem; align-items: center; text-align: center;
         padding: 1.8rem 1rem; border: 1px dashed var(--edge); color: var(--ink-soft); }
@@ -1703,7 +1704,8 @@ def config_section(recs: list, configured: bool) -> str:
 def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, older: int,
                  findings: list[dict], chart_file, profile_html: str | None,
                  muted: set[str], now: datetime, verdict: Verdict,
-                 cap: dict | None = None, retention_days: int | None = None) -> str:
+                 cap: dict | None = None, retention_days: int | None = None,
+                 takes_files: bool = False) -> str:
     """One cluster: what happened to it, newest first, and what normal looks like there."""
     cutoff = int(now.timestamp() * 1000) - WINDOW_DAYS * 86_400_000
     quiet = silent_hours(state, now, summary)
@@ -1772,6 +1774,8 @@ def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, olde
                     any(n.get("config") for n in summary.get("nodes", [])))}
     {capacity_section(cap) if cap else ''}
     {profile}
+    {f'<p class="keep"><a class="needs-server" href="../files/{esc(cluster_id)}">'
+     f'Add FTDC files</a></p>' if takes_files else ''}
     {f'<p class="keep">Raw FTDC kept for {esc(retention_label(retention_days))}. '
      f'<a class="needs-server" href="../settings/{esc(cluster_id)}">Change</a></p>'
      if retention_days else ''}
@@ -2165,7 +2169,8 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
                        len(by_moment(list(older))) + len(fixed),
                        findings, chart_file, profile_section(base, now), muted, now, verdict,
                        capacity(base, summary, findings, now),
-                       retention_days=spec.get("retention_days")))
+                       retention_days=spec.get("retention_days"),
+                       takes_files=(spec.get("source") or {}).get("type") == "onprem"))
     if older or fixed:
         write(site / "history.html", page_history(cluster_id, older, fixed, now))
     elif (site / "history.html").exists():

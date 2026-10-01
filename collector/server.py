@@ -365,16 +365,22 @@ def choose_page() -> str:
         <span>An API key with read-only access to the project. Everything Atlas still holds
           comes down straight away.</span>
       </a>
+      <a class="door recommended" href="/add/files">
+        <b>On your own servers: upload its FTDC</b>
+        <span>Recommended. Each member's <code>diagnostic.data</code> as an archive: one
+          sample a second and every day mongod kept, with nothing installed or changed on the
+          hosts. Upload newer files whenever you want it brought up to date.</span>
+      </a>
+      <a class="door" href="/add/onprem">
+        <b>On your own servers: connect to it</b>
+        <span>A monitoring user, read every 10 seconds unless you choose otherwise, so it keeps
+          collecting by itself; the next page prices each interval. Spikes shorter than the
+          interval can be missed.</span>
+      </a>
       <a class="door" href="/add/folder">
         <b>From a folder on this machine</b>
         <span>A <code>diagnostic.data</code> this machine can already see: a local mongod,
           a mounted share, or wherever something else copies the files.</span>
-      </a>
-      <a class="door" href="/add/onprem">
-        <b>With a connection string, or files</b>
-        <span>A monitoring user, and nothing on the hosts. Read every 10 seconds unless you
-          choose otherwise, down to every second; the next page prices each choice. Or FTDC
-          files to upload once.</span>
       </a>
     </div>""")
 
@@ -467,6 +473,88 @@ def atlas_page(error: str = "", env_keys: bool = False) -> str:
     </div>""")
 
 
+# How a DBA packs a member's files, on the member. Read-only, one-off, nothing left behind.
+PACK = """sudo tar czf "$(hostname)-ftdc.tgz" -C /var/lib/mongo diagnostic.data
+# dbPath elsewhere?  grep dbPath /etc/mongod.conf   (Ubuntu: /var/lib/mongodb)"""
+
+
+def drop_zone() -> str:
+    """Where FTDC archives are dropped. Each is uploaded as it lands and described back --
+    which members, which days -- before anything is added."""
+    return f"""
+      <div class="card">
+        <div class="drop" id="drop" tabindex="0">
+          <b>Drop FTDC files here</b>
+          <span>A .tar.gz, .tgz, .tar or .zip of each member's <code>diagnostic.data</code> —
+            one member or all of them, in one archive or several — or
+            <label for="file" class="link">choose them</label>.</span>
+          <input id="file" type="file" multiple
+                 accept=".gz,.tgz,.tar,.zip,application/gzip,application/zip">
+        </div>
+        <div id="uploads"></div>
+        <p class="hint">On each member, as a user that can read mongod's files:</p>
+        <pre class="snippet">{esc(PACK)}</pre>
+        <p class="hint">Members are recognised from the files themselves, so the names and the
+          layout inside the archive do not matter.</p>
+      </div>"""
+
+
+def files_page(error: str = "", name: str = "", retention: int = DEFAULT_RETENTION) -> str:
+    """The recommended way in for a cluster of your own: the FTDC mongod already writes."""
+    return page("Add a cluster from its FTDC files · mongo-health", f"""
+    <p><a href="/add" class="back">← back</a></p>
+    <h1>Add a cluster from its FTDC files</h1>
+    {flash(error)}
+    <p class="lede">One sample a second, and every day mongod has kept: the same data Atlas
+      hands over. Nothing is installed or changed on the hosts. Upload newer files from the
+      cluster's page whenever you want it brought up to date.</p>
+    <form method="post" action="/add/onprem" id="onprem">
+      <input type="hidden" name="from" value="files">
+      <div class="card">
+        <label for="m_id">Name</label>
+        <input id="m_id" name="id" type="text" required placeholder="orders-prod"
+               value="{esc(name)}">
+        {retention_field(retention)}
+      </div>
+      {drop_zone()}
+      <button type="submit" id="continue">Add the cluster</button>
+    </form>
+    <script>{UPLOAD_JS}</script>""")
+
+
+def more_files_page(cluster_id: str, error: str = "", unknown: list[str] | None = None,
+                    tokens: list[str] | None = None) -> str:
+    """More files for a cluster already here. Overlapping what it holds is fine: what it has
+    is skipped, and what grew since is taken."""
+    confirm = ""
+    if unknown:
+        hidden = "".join(f'<input type="hidden" name="upload" value="{esc(t)}">'
+                         for t in tokens or [])
+        confirm = f"""
+    <div class="card">
+      <p>These members are new to {esc(cluster_id)}: <code>{esc(", ".join(unknown))}</code>.
+        If the files are from another cluster, they would be judged as part of this one.</p>
+      <form method="post" action="/files/{esc(cluster_id)}">
+        {hidden}
+        <input type="hidden" name="confirm" value="{esc(cluster_id)}">
+        <button type="submit">Add them to {esc(cluster_id)}</button>
+        <a href="/files/{esc(cluster_id)}" class="back" style="margin-left:1rem">Cancel</a>
+      </form>
+    </div>"""
+    return page(f"Add FTDC files to {cluster_id} · mongo-health", f"""
+    <p><a href="/{esc(cluster_id)}/index.html" class="back">← {esc(cluster_id)}</a></p>
+    <h1>Add FTDC files to {esc(cluster_id)}</h1>
+    {flash(error)}
+    {confirm}
+    <p class="lede">Files it already holds are skipped, and the one mongod was still writing
+      is taken again with what it gained. They are analysed straight away.</p>
+    <form method="post" action="/files/{esc(cluster_id)}" id="onprem">
+      {drop_zone()}
+      <button type="submit" id="continue">Add the files</button>
+    </form>
+    <script>{UPLOAD_JS}</script>""")
+
+
 def onprem_page(error: str = "", name: str = "", uri: str = "",
                 retention: int = DEFAULT_RETENTION) -> str:
     """A connection string, files, or both. The files are dropped onto the page and uploaded
@@ -497,20 +585,7 @@ def onprem_page(error: str = "", name: str = "", uri: str = "",
       </div>
 
       <h2>Add its history <span class="optional">— the days before today</span></h2>
-      <div class="card">
-        <div class="drop" id="drop" tabindex="0">
-          <b>Drop FTDC files here</b>
-          <span>A .tar.gz, .tgz, .tar or .zip of each member's <code>diagnostic.data</code> —
-            one member or all of them, in one archive or several — or
-            <label for="file" class="link">choose them</label>.</span>
-          <input id="file" type="file" multiple
-                 accept=".gz,.tgz,.tar,.zip,application/gzip,application/zip">
-        </div>
-        <div id="uploads"></div>
-        <p class="hint">mongod keeps them in <code>diagnostic.data</code> under its
-          <code>dbPath</code>. Members are recognised from the files themselves, so the layout
-          inside the archive does not matter.</p>
-      </div>
+      {drop_zone()}
 
       <p class="hint">Either one is enough; both is best — the files bring the past, the
         connection keeps it going.</p>
@@ -716,12 +791,18 @@ class Handler(SimpleHTTPRequestHandler):
         path = urlsplit(self.path).path
         env_keys = bool(os.environ.get("ATLAS_PUBLIC_KEY"))
         pages = {"/add": choose_page, "/add/atlas": lambda: atlas_page(env_keys=env_keys),
-                 "/add/onprem": onprem_page, "/add/folder": folder_page}
+                 "/add/onprem": onprem_page, "/add/folder": folder_page,
+                 "/add/files": files_page}
         if path in pages:
             return self._html(pages[path]())
         m = re.fullmatch(r"/progress/([^/]+)", path)
         if m and config.CLUSTER_ID.match(m.group(1)):
             return self._progress(m.group(1))
+        m = re.fullmatch(r"/files/([^/]+)", path)
+        if m:
+            if not self._takes_files(m.group(1)):
+                return self._html("<p>No cluster by that name takes uploaded files.</p>", 404)
+            return self._html(more_files_page(m.group(1)))
         m = re.fullmatch(r"/settings/([^/]+)", path)
         if m:
             entry = self._entry(m.group(1))
@@ -767,6 +848,9 @@ class Handler(SimpleHTTPRequestHandler):
             back = urlsplit(self.headers.get("Referer") or "").path or f"/{m.group(1)}/"
             return self._redirect(back)
 
+        m = re.fullmatch(r"/files/([^/]+)", path)
+        if m:
+            return self._more_files(m.group(1), form.get("upload") or [], one("confirm"))
         m = re.fullmatch(r"/settings/([^/]+)", path)
         if m:
             return self._settings(m.group(1), one("retention_days"), one("confirm"))
@@ -786,7 +870,7 @@ class Handler(SimpleHTTPRequestHandler):
                               retention_from(one("retention_days")))
         if path == "/add/onprem":
             return self._onprem(one("id"), one("uri"), form.get("upload") or [],
-                                retention_from(one("retention_days")))
+                                retention_from(one("retention_days")), one("from"))
         if path == "/add/onprem/confirm":
             return self._onprem_confirm(one("token"), one("interval"))
         return self._html("<p>Not found.</p>", 404)
@@ -902,18 +986,46 @@ class Handler(SimpleHTTPRequestHandler):
                               "to": max(s["to"] for s in spans if s["to"])})
         return found
 
-    def _onprem(self, cluster_id: str, uri: str, tokens: list[str],
-                retention: int = DEFAULT_RETENTION):
-        if not config.CLUSTER_ID.match(cluster_id):
-            return self._html(onprem_page("A name is letters, digits, dots, dashes or "
-                                          "underscores.", cluster_id, uri), 400)
+    def _takes_files(self, cluster_id: str) -> bool:
+        """Uploaded files land in `incoming/`, which only an on-premise source reads."""
+        entry = self._entry(cluster_id)
+        return bool(entry) and (entry.get("source") or {}).get("type") == "onprem"
+
+    def _more_files(self, cluster_id: str, tokens: list[str], confirm: str):
+        if not self._takes_files(cluster_id):
+            return self._html("<p>No cluster by that name takes uploaded files.</p>", 404)
         uploads = self._uploads(tokens)
+        if not uploads:
+            return self._html(more_files_page(
+                cluster_id, "Drop at least one FTDC archive, and wait for it to finish "
+                            "uploading."), 400)
+        base = self.app.data / cluster_id
+        held = ftdcfiles.members_of(base)
+        unknown = sorted({u["member"] for u in uploads} - held)
+        # A cluster with no members yet has nothing to be mixed up with.
+        if held and unknown and confirm != cluster_id:
+            return self._html(more_files_page(cluster_id, unknown=unknown,
+                                              tokens=sorted({u["token"] for u in uploads})))
+        for token in sorted({u["token"] for u in uploads}):
+            ftdcfiles.adopt(self._staging(token), base / "incoming")
+        self.app.start_capture(cluster_id)
+        return self._redirect(f"/{cluster_id}/index.html")
+
+    def _onprem(self, cluster_id: str, uri: str, tokens: list[str],
+                retention: int = DEFAULT_RETENTION, origin: str = ""):
+        if origin == "files":
+            again = lambda msg: self._html(files_page(msg, cluster_id, retention), 400)  # noqa: E731
+        else:
+            again = lambda msg: self._html(onprem_page(msg, cluster_id, uri, retention), 400)  # noqa: E731
+        if not config.CLUSTER_ID.match(cluster_id):
+            return again("A name is letters, digits, dots, dashes or underscores.")
+        uploads = self._uploads(tokens)
+        if origin == "files" and not uploads:
+            return again("Drop at least one FTDC archive, and wait for it to finish uploading.")
         if not uri and not uploads:
-            return self._html(onprem_page("Give it a connection string, some FTDC files, or "
-                                          "both.", cluster_id, uri), 400)
+            return again("Give it a connection string, some FTDC files, or both.")
         if uri and not uri.startswith(("mongodb://", "mongodb+srv://")):
-            return self._html(onprem_page("A connection string starts with mongodb:// or "
-                                          "mongodb+srv://.", cluster_id, uri), 400)
+            return again("A connection string starts with mongodb:// or mongodb+srv://.")
         pending = {"id": cluster_id, "uri": uri, "uploads": sorted({u["token"] for u in uploads}),
                    "retention_days": retention}
         if not uri:

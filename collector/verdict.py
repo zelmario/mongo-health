@@ -146,8 +146,8 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
     critical_today = sorted((m for m in recent if m.severity == "critical"
                              and m.to_ms >= now_ms - AT_RISK_HOURS * HOUR_MS), key=order)
     # Said once, after the finding: which moment "the last day" means, and what keeps it going.
-    upto = (f" Judged on the FTDC provided, which ends {ends:%d %b %Y %H:%M} UTC. To keep it "
-            f"current, add the cluster over SFTP or from a folder." if archive else "")
+    upto = (f" Judged on the FTDC provided, which ends {ends:%d %b %Y %H:%M} UTC. Upload newer "
+            f"files from this page to bring it up to date." if archive else "")
     if archive:
         if recent:
             ranked = sorted(recent, key=order)

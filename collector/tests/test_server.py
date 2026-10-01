@@ -625,3 +625,73 @@ def test_atlas_clusters_are_told_atlas_cannot_give_the_files_back(running):
 def test_settings_for_a_cluster_that_is_not_there(running):
     assert get(running, "/settings/nope")[0] == 404
     assert post(running, "/settings/nope", {"retention_days": "30"})[0] == 404
+
+
+# --------------------------------------------------------------- the FTDC people already have
+
+def onprem_cluster(running, cid="orders"):
+    token = upload(running, ftdc_archive(running["tmp"]))[1]["token"]
+    post(running, "/add/onprem", {"id": cid, "upload": token, "from": "files"})
+    return running["data"] / cid
+
+
+def test_uploading_its_ftdc_is_the_recommended_way_in_for_your_own_servers(running):
+    body = get(running, "/add")[1]
+    assert body.index('href="/add/files"') < body.index('href="/add/onprem"')
+    assert 'class="door recommended" href="/add/files"' in body
+    files = get(running, "/add/files")[1]
+    assert "Drop FTDC files here" in files and "tar czf" in files
+    assert 'name="retention_days"' in files and "Connection string" not in files
+
+
+def test_the_files_page_asks_for_files_and_says_so_on_its_own_page(running):
+    status, _, body = post(running, "/add/onprem", {"id": "orders", "from": "files"})
+    assert status == 400 and "Drop at least one FTDC archive" in body
+    assert "Add a cluster from its FTDC files" in body
+
+
+def test_a_cluster_from_files_can_be_given_more_later(running):
+    base = onprem_cluster(running)
+    assert 'href="../files/orders"' in get(running, "/orders/index.html")[1]
+    assert get(running, "/files/orders")[0] == 200
+    running["started"].clear()
+    token = upload(running, ftdc_archive(running["tmp"] / "again"))[1]["token"]
+    status, headers, _ = post(running, "/files/orders", {"upload": token})
+    assert status == 303 and headers["Location"] == "/orders/index.html"
+    assert running["started"] == ["orders"]
+    assert sorted(p.name for p in (base / "incoming").iterdir()) == ["db1_27017", "db2_27017"]
+
+
+def test_files_from_members_it_has_never_seen_wait_for_a_yes(running):
+    base = onprem_cluster(running)
+    token = upload(running, ftdc_archive(running["tmp"] / "other", members=("db9:27017",)))[1]["token"]
+    body = post(running, "/files/orders", {"upload": token})[2]
+    assert "These members are new to orders" in body and "db9_27017" in body
+    assert not (base / "incoming" / "db9_27017").exists()
+    post(running, "/files/orders", {"upload": token, "confirm": "orders"})
+    assert (base / "incoming" / "db9_27017").is_dir()
+
+
+def test_only_clusters_that_read_uploads_take_them(running):
+    assert get(running, "/files/prod")[0] == 404, "a directory source never reads incoming/"
+    assert 'href="../files/prod"' not in get(running, "/prod/index.html")[1]
+    assert post(running, "/files/nope", {"upload": "a" * 24})[0] == 404
+
+
+def test_a_second_upload_takes_what_the_open_file_gained(tmp_path):
+    import ftdcfiles
+    incoming = tmp_path / "incoming"
+    (incoming / "db1").mkdir(parents=True)
+    for name, size in (("metrics.2026-08-01T00-00-00Z-00000", 10),
+                       ("metrics.2026-08-02T00-00-00Z-00000", 10), ("metrics.interim", 10)):
+        (incoming / "db1" / name).write_bytes(b"o" * size)
+    staging = tmp_path / "staging"
+    (staging / "members" / "db1").mkdir(parents=True)
+    for name, size in (("metrics.2026-08-01T00-00-00Z-00000", 5),
+                       ("metrics.2026-08-02T00-00-00Z-00000", 20), ("metrics.interim", 3)):
+        (staging / "members" / "db1" / name).write_bytes(b"n" * size)
+    ftdcfiles.adopt(staging, incoming)
+    sizes = {p.name: p.stat().st_size for p in (incoming / "db1").iterdir()}
+    assert sizes == {"metrics.2026-08-01T00-00-00Z-00000": 10,      # a shorter copy: kept ours
+                     "metrics.2026-08-02T00-00-00Z-00000": 20,      # it grew: taken
+                     "metrics.interim": 3}                          # always the newest

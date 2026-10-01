@@ -140,13 +140,25 @@ def receive(archive: Path, staging: Path) -> list[dict]:
 
 def adopt(staging: Path, incoming: Path) -> None:
     """Move received members into a cluster's incoming directory, next to what the poller
-    writes for the same members."""
+    writes for the same members.
+
+    A file already there is replaced when the new copy is larger, or is `metrics.interim`.
+    mongod keeps appending to its newest file, so a second upload carries the same name with
+    more in it -- and keeping the first copy dropped exactly the hours the upload was for.
+    """
     members = staging / "members"
     for member in (members.iterdir() if members.exists() else []):
         target = incoming / member.name
         target.mkdir(parents=True, exist_ok=True)
         for f in member.iterdir():
             dest = target / f.name
-            if not dest.exists():
+            if (not dest.exists() or f.name == "metrics.interim"
+                    or f.stat().st_size > dest.stat().st_size):
                 shutil.move(str(f), dest)
     shutil.rmtree(staging, ignore_errors=True)
+
+
+def members_of(base: Path) -> set[str]:
+    """The members a cluster already holds files for, by directory name."""
+    return {d.name for sub in ("ftdc", "incoming") if (base / sub).is_dir()
+            for d in (base / sub).iterdir() if d.is_dir()}
