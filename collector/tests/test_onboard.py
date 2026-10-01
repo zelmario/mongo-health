@@ -180,3 +180,24 @@ def test_onboarding_ends_with_the_first_evaluation(tmp_path, monkeypatch, capsys
     out = capsys.readouterr().out
     assert "c1: Not being watched" in out
     assert (tmp_path / "site" / "c1" / "index.html").exists()
+
+
+def test_a_sharded_cluster_says_so(monkeypatch):
+    """Replica sets only in this version. It used to be skipped as 'M0/Flex' -- right outcome,
+    wrong reason, and the reason is what the person acts on."""
+    sharded = {**atlas_cluster(name="big", tier="M30"), "clusterType": "SHARDED",
+               "connectionStrings": {"standard": "mongodb://big-shard-00-00.x.mongodb.net:27016"}}
+    [c] = discover_with(monkeypatch, [sharded])
+    assert c["sharded"] is True and c["replica_set"] is None
+
+
+def test_a_sharded_cluster_is_disabled_on_the_pick_page_with_its_reason(monkeypatch):
+    import server
+    html = server.pick_page("t", "g", [{"name": "big", "replica_set": None, "sharded": True,
+                                        "tier": "M30", "version": "8.0.34"}], set())
+    assert "replica sets only" in html and "M0/Flex" not in html and "disabled" in html
+
+
+def discover_with(monkeypatch, clusters):
+    stub(monkeypatch, clusters)
+    return discover("g", "pub", "priv")

@@ -90,8 +90,8 @@ def check(uri: str) -> dict:
         return result
     result["kind"] = found["kind"]
     if found["kind"] == "sharded":
-        result["error"] = ("This is a mongos: sharded clusters are not supported yet. Connect "
-                           "to each shard's replica set, and the config servers, on their own.")
+        result["error"] = ("This is a mongos. This version watches replica sets only, so a "
+                           "sharded cluster cannot be added as a whole yet.")
         return result
     for host in found["members"]:
         row = {"host": host, "ok": False, "version": None, "error": None}
@@ -182,7 +182,7 @@ class ClusterPoller:
             self.error = f"{type(e).__name__}: {str(e)[:200]}"
             return
         if found["kind"] == "sharded":
-            self.error = "sharded clusters are not supported yet"
+            self.error = "this is a mongos: this version watches replica sets only"
             return
         wanted = set(found["members"])
         for host in list(self.members):

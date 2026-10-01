@@ -68,9 +68,14 @@ def discover(group_id: str, public_key: str, private_key: str) -> list[dict]:
         conn = (c.get("connectionStrings") or {}).get("standard", "")
         match = re.search(r"replicaSet=([^&\s]+)", conn)
         provider = c.get("providerSettings") or {}
+        # Replica sets only in this version. A sharded cluster's standard string points at the
+        # mongos and carries no replicaSet=, so it was already left out -- but it said "M0/Flex",
+        # which is the wrong reason, and the reason is what the person acts on.
+        sharded = c.get("clusterType") in ("SHARDED", "GEOSHARDED")
         out.append({
             "name": c["name"],
-            "replica_set": match.group(1) if match else None,
+            "replica_set": None if sharded else (match.group(1) if match else None),
+            "sharded": sharded,
             "version": c.get("mongoDBVersion"),
             "tier": provider.get("instanceSizeName"),
             "region": provider.get("regionName"),
@@ -176,7 +181,9 @@ def main() -> int:
             flags.append("AUTOSCALING ON")
         if c["state"] != "IDLE":
             flags.append(c["state"])
-        if not c["replica_set"]:
+        if c.get("sharded"):
+            flags.append("sharded — replica sets only in this version")
+        elif not c["replica_set"]:
             flags.append("no replica set name — cannot collect")
         print(f"  {c['name']:24} {c['tier'] or '?':6} {c['version'] or '?':9} "
               f"{c['replica_set'] or '—':26} {' · '.join(flags)}")

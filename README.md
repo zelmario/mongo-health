@@ -4,6 +4,9 @@ Is my MongoDB cluster healthy? Keeps your FTDC past Atlas's 3–10 day retention
 the [Big Hole](https://github.com/zelmario/Big-hole) rules,
 and emails you when something happens.
 
+Watches replica sets, on Atlas or self-managed. Sharded clusters are not supported in this
+version.
+
 Work in progress: the README, configuration and packaging are being rewritten for the first
 public release.
 

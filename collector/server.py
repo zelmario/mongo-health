@@ -327,7 +327,9 @@ def pick_page(token: str, group_id: str, found: list[dict], already: set[str]) -
         usable = bool(c.get("replica_set"))
         taken = c["name"] in already
         note = ("already added" if taken else
-                "" if usable else "no replica set name, so it cannot be collected (M0/Flex)")
+                "" if usable else
+                "sharded: this version watches replica sets only" if c.get("sharded") else
+                "no replica set name, so it cannot be collected (M0/Flex)")
         rows.append(f"""
         <label class="pick">
           <input type="checkbox" name="cluster" value="{esc(c['name'])}"
