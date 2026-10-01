@@ -293,6 +293,7 @@ MEASURES = {
     "replication-lag":         ("Spread between members", "ms", True),
     "disk-space-low":          ("Free space on the data disk", "percent", False),
     "disk-space-critical":     ("Free space on the data disk", "percent", False),
+    "swapping":                ("Pages swapped in", "per second", True),
     "oplog-window-short":      ("Oplog window", "seconds", False),
     "oplog-window-critical":   ("Oplog window", "seconds", False),
     "command-latency-high":    ("Time per command", "us", True),

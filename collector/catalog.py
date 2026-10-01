@@ -43,6 +43,7 @@ AREA_OF = {
     "flow-control-engaged": "replication",
     "cache-dirty-high": "cache", "cache-full": "cache", "eviction-by-app-threads": "cache",
     "eviction-aggressive": "cache", "memory-low": "cache", "page-faults-sustained": "cache",
+    "swapping": "cache",
     "history-store-pinned": "cache",
     "checkpoint-slow": "storage", "disk-read-latency-high": "storage",
     "disk-write-latency-high": "storage",

@@ -938,6 +938,32 @@ export const RULES: readonly Rule[] = [
   },
 
   {
+    id: 'swapping',
+    title: 'The host is swapping mongod back in from disk',
+    severity: 'warning',
+    // Swap-ins, not swap used: a few megabytes parked in swap and never touched cost nothing
+    // (Cluster1 holds 16-40 MB there for weeks), while pages coming back in mean a query is
+    // waiting on the disk for memory it already had. Pages of 4 KB, so 100/s is 400 KB/s.
+    //
+    // Measured: rs-local, three mongods on one host with 4 GB in swap, spent 165 minutes at or
+    // above 100/s under load -- in flaps of seconds, the longest unbroken one 151 s, hence the
+    // tolerance. Cluster1 reached it in two to six bursts of one or two seconds in 20 days per
+    // member, which no amount of bridging adds up to a minute.
+    metric: 'rate(systemMetrics.vmstat.pswpin)',
+    op: '>=',
+    threshold: 100,
+    sustainMs: 60_000,
+    toleranceMs: 30_000,
+    unit: 'per-sec',
+    what: 'The operating system was reading memory pages back from swap, so mongod was waiting on the disk for memory it already had.',
+    check:
+      'The host does not have the memory its processes want. Look at what else runs there, and ' +
+      'at the WiredTiger cache against total memory -- several mongods on one host each take ' +
+      'half of it by default. Give it more memory or a smaller cacheSizeGB, and set ' +
+      'vm.swappiness to 1 so the kernel keeps mongod in memory over file cache.',
+  },
+
+  {
     id: 'connection-storm',
     title: 'Clients are reconnecting in a storm',
     severity: 'warning',

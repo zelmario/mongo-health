@@ -19,7 +19,7 @@ are in [rules.md](rules.md).
 | Execution tickets saturated or exhausted | `read-/write-tickets-saturated`, `-exhausted` |
 | Operations queueing | `read-/write-queue-building` |
 | Cache under pressure, eviction falling behind | `cache-dirty-high`, `cache-full`, `eviction-by-app-threads`, `eviction-aggressive` |
-| Host running out of memory, paging | `memory-low`, `page-faults-sustained` |
+| Host running out of memory, paging, swapping | `memory-low`, `page-faults-sustained`, `swapping` |
 | Slow checkpoints, slow disk | `checkpoint-slow`, `disk-read-/write-latency-high` |
 | Members down or lagging, elections | `member-unhealthy`, `replication-lag`, `election-held` |
 | Replication pushing back on the primary | `flow-control-engaged`, `oplog-backlog`, `oplog-churn` |
@@ -81,8 +81,10 @@ in a way nothing else explains, and the fix (memory, or a smaller cache) is spec
 - **Data:** `systemMetrics.vmstat.pswpin`/`pswpout`, `SwapTotal_kb`/`SwapFree_kb`.
 - **Measured:** rs-local used up to 4 GB of swap, with 916 pages/s swapped in at p99 during
   load. Cluster1 holds 16–40 MB in swap and swaps in only in rare bursts.
-- **Proposal:** swap-ins above ~100 pages/s sustained for a minute → warning. Calibrate against
-  the rs-local load windows (fires) and Cluster1 (stays silent).
+- **Done (swapping).** Swap-ins ≥ 100 pages/s for a minute in total, dips of 30 s tolerated —
+  they flap: rs-local's longest unbroken stretch was 151 s inside 165 minutes above the line.
+  Over the full histories it fires on the rs-local load windows (10 and 17 August) and never on
+  Cluster1, whose bursts last one or two seconds.
 
 ### 4. CPU steal — burstable instances out of credits
 
