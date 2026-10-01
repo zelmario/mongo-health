@@ -36,13 +36,30 @@ def opened(path: Path):
     return path.open("r", encoding="utf-8", errors="replace")
 
 
+# Where the JSON starts. Usually at the beginning of the line; after a prefix when mongod logs
+# to syslog or the log was taken with journalctl -- "Jul 15 06:52:31 host mongo[3731]: {...}",
+# which is how a real support bundle's 2.6 GB log arrived.
+JSON_START = '{"t":{"$date"'
+
+
+def entry(line: str) -> dict | None:
+    """One line as its JSON document, prefix or not."""
+    at = line.find(JSON_START)
+    if at < 0:
+        return None
+    try:
+        return json.loads(line[at:])
+    except ValueError:
+        return None
+
+
 def is_log(path: Path) -> bool:
-    """A mongod structured log (4.4+): its first line is a JSON object with a `t.$date`."""
+    """A mongod structured log (4.4+): its first line holds a JSON object with a `t.$date`."""
     try:
         with opened(path) as fh:
             for line in fh:
                 if line.strip():
-                    return line.lstrip().startswith('{"t":{"$date"')
+                    return JSON_START in line
     except (OSError, EOFError, UnicodeDecodeError):
         return False
     return False
@@ -110,7 +127,13 @@ def describe(attr: dict) -> tuple[str, str] | None:
     else:
         op_base = op
     if op_base == "aggregate":
-        return op, pipeline_shape(command.get("pipeline"))
+        stages = command.get("pipeline") if isinstance(command.get("pipeline"), list) else []
+        first = next(iter(stages[0]), "") if stages and isinstance(stages[0], dict) else ""
+        if first.startswith(("$changeStream", "$_internalChangeStream")):
+            # A change stream reads the oplog from where it left off: its COLLSCAN is the design,
+            # not a missing index, and named as an aggregate it read as the cause of a scan storm.
+            return op.replace("aggregate", "change stream"), ""
+        return op, pipeline_shape(stages)
     filt = command.get("filter", command.get("query", command.get("q")))
     return op, shape(filt) if isinstance(filt, dict) else ""
 
@@ -128,15 +151,11 @@ def summarize(path: Path) -> dict:
     with opened(path) as fh:
         for line in fh:
             if member is None and STARTING in line:
-                try:
-                    a = json.loads(line).get("attr") or {}
-                    member = short_host(a.get("host"))
-                except ValueError:
-                    pass
+                member = short_host(((entry(line) or {}).get("attr") or {}).get("host"))
             if SLOW_QUERY not in line:
                 continue
+            doc = entry(line)
             try:
-                doc = json.loads(line)
                 at = datetime.fromisoformat(doc["t"]["$date"].replace("Z", "+00:00"))
             except (ValueError, KeyError, TypeError):
                 continue

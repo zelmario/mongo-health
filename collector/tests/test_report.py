@@ -551,3 +551,20 @@ def test_a_log_that_misses_the_window_says_so(tmp_path):
     hold_log(tmp_path / "data", "n0", datetime(2026, 8, 1, tzinfo=timezone.utc))
     page = (build(tmp_path, [spec]) / "prod" / "incidents" / "a.html").read_text()
     assert "does not cover this window" in page
+
+
+def test_a_scan_incident_says_when_its_scans_were_too_fast_to_be_logged(tmp_path):
+    """56 to 76 scans a second, none over slowms: the costly index scans are not the answer."""
+    import tests.test_logsummary as tl
+    at = datetime.fromtimestamp((MS - 2 * DAY) / 1000, timezone.utc)
+    spec = cluster(tmp_path / "data", [finding("a", node="n0", rule="collection-scans-sustained",
+                                               title="Full collection scans running steadily")])
+    host = tl.line("2026-08-01T00:00:00.000+00:00", {"host": "n0", "port": 27017}, 4615611,
+                   "MongoDB starting")
+    log = tmp_path / "n0.log"
+    log.write_text(host + "\n" + tl.scan((at + timedelta(minutes=5)).isoformat(),
+                                         planSummary="IXSCAN { status: 1 }") + "\n")
+    report.logsummary.store(report.logsummary.summarize(log), tmp_path / "data" / "prod" / "logs", "x")
+    page = (build(tmp_path, [spec]) / "prod" / "incidents" / "a.html").read_text()
+    assert "None of these collection scans took longer than" in page
+    assert "setProfilingLevel(0, { slowms: 20 })" in page

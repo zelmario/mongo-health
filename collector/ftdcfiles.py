@@ -54,6 +54,32 @@ def _reference(doc: dict) -> dict | None:
         return None
 
 
+# Since 8.0 a mongod that can route writes its FTDC in sections by role -- {"common": {...},
+# "shard": {...}, "router": {...}} -- and what used to sit at the top is inside one of them:
+# hostInfo under common, replSetGetStatus under shard. Read at the top only, a real 8.0 replica
+# set's three members all came out unnamed and were filed as one.
+ROLES = ("common", "shard", "router")
+
+
+def section(doc: dict, key: str) -> dict:
+    """`doc[key]`, or the same key inside a role section."""
+    if isinstance(doc.get(key), dict):
+        return doc[key]
+    for role in ROLES:
+        inner = doc.get(role)
+        if isinstance(inner, dict) and isinstance(inner.get(key), dict):
+            return inner[key]
+    return {}
+
+
+def fallback_name(path: Path) -> str:
+    """The folder a member's files sit in, when the files do not say: `node1/diagnostic.data/`
+    is `node1`, not `diagnostic.data`, which is what every member's folder is called."""
+    folder = path.parent
+    return folder.parent.name if folder.name == "diagnostic.data" and folder.parent.name else \
+        folder.name
+
+
 def describe(path: Path) -> dict:
     """{member, from, to} for one FTDC file, as far as its contents say."""
     member = None
@@ -70,13 +96,13 @@ def describe(path: Path) -> dict:
                 last = at
             if member is None:
                 ref = _reference(doc) or {}
-                me = [m.get("name") for m in (ref.get("replSetGetStatus") or {}).get("members", [])
+                me = [m.get("name") for m in section(ref, "replSetGetStatus").get("members", [])
                       if m.get("self")]
                 member = me[0] if me else None
     if member is None and metadata:
-        host = ((metadata.get("hostInfo") or {}).get("system") or {}).get("hostname")
-        port = ((((metadata.get("getCmdLineOpts") or {}).get("parsed") or {}).get("net") or {})
-                .get("port", 27017))
+        host = (section(metadata, "hostInfo").get("system") or {}).get("hostname")
+        port = ((section(metadata, "getCmdLineOpts").get("parsed") or {}).get("net") or {}).get(
+            "port", 27017)
         member = f"{host}:{port}" if host else None
     return {"member": member, "from": first, "to": last}
 
@@ -114,8 +140,7 @@ def host_of(path: Path) -> str | None:
     """The short host name in an FTDC file's metadata, which is how findings name a member."""
     for doc in _documents(path):
         if doc.get("type") == 0:
-            host = (((doc.get("doc") or {}).get("hostInfo") or {}).get("system") or {}).get(
-                "hostname")
+            host = (section(doc.get("doc") or {}, "hostInfo").get("system") or {}).get("hostname")
             return logsummary.short_host(host)
     return None
 
@@ -139,9 +164,13 @@ def receive_logs(raw: Path, staging: Path, ftdc: list[Path]) -> list[dict]:
             continue
         summary = logsummary.summarize(path)
         if summary["member"] is None:
-            near = [h for d, h in hosts_by_dir.items() if d.parent == path.parent
-                    or d.parent.parent == path.parent.parent]
-            summary["member"] = near[0] if len(set(near)) == 1 else only
+            # The diagnostic.data in its own folder first; only without one, a folder beside it.
+            # Both at once made every log of a two-member archive see both members, and name
+            # neither.
+            beside = {h for d, h in hosts_by_dir.items() if d.parent == path.parent}
+            near = beside or {h for d, h in hosts_by_dir.items()
+                              if d.parent.parent == path.parent.parent}
+            summary["member"] = next(iter(near)) if len(near) == 1 else only
         entry = {"log": path.name, "member": summary["member"], "slow": summary["slow"],
                  "from": summary["first"], "to": summary["last"]}
         if summary["member"] and summary["first"] is not None:
@@ -169,7 +198,7 @@ def receive(archive: Path, staging: Path, name: str | None = None) -> list[dict]
         info = describe(path)
         if info["from"] is None:
             continue
-        name = info["member"] or path.parent.name
+        name = info["member"] or fallback_name(path)
         target = staging / "members" / member_dir(name)
         target.mkdir(parents=True, exist_ok=True)
         # Two members' files can share a name -- they are named by time -- so a clash keeps both.

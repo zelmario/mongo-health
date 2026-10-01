@@ -106,3 +106,20 @@ def test_only_structured_logs_are_logs(tmp_path):
     assert logsummary.is_log(write(tmp_path, [STARTING]))
     (tmp_path / "notes.txt").write_text("hello\n")
     assert not logsummary.is_log(tmp_path / "notes.txt")
+
+
+def test_a_log_taken_from_syslog_or_journald_is_read_through_its_prefix(tmp_path):
+    """How a real support bundle's 2.6 GB log arrived: every line behind a syslog prefix."""
+    prefix = "Jul 15 06:52:31 ip-172-19-100-152.eu-west-1.compute.internal mongo[3731]: "
+    log = write(tmp_path, [prefix + STARTING, prefix + scan("2026-10-01T20:58:15.000+00:00")])
+    assert logsummary.is_log(log)
+    s = logsummary.summarize(log)
+    assert s["member"] == "db1" and s["slow"] == 1
+
+
+def test_a_change_stream_is_named_as_one_not_as_a_scanning_aggregate():
+    op, shape = logsummary.describe({"ns": "zero.customers", "command": {"getMore": 1},
+                                     "originatingCommand": {"aggregate": "customers", "pipeline": [
+                                         {"$_internalChangeStreamOplogMatch": {}},
+                                         {"$_internalChangeStreamUnwindTransaction": {}}]}})
+    assert (op, shape) == ("getMore of change stream", "")

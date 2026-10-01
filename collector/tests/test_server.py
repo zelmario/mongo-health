@@ -744,3 +744,35 @@ def test_a_new_cluster_needs_its_ftdc_not_just_a_log(running):
     token = upload(running, log)[1]["token"]
     status, _, body = post(running, "/add/onprem", {"id": "x", "upload": token, "from": "files"})
     assert status == 400 and "not instead of it" in body
+
+
+def test_an_eight_oh_capture_in_role_sections_keeps_its_members_apart(running):
+    """8.0 writes {"common": ..., "shard": ...}: read at the top only, three members of a real
+    replica set came out unnamed, all filed as "diagnostic.data", and their logs were dropped."""
+    import tarfile
+    from datetime import datetime, timedelta, timezone
+    import bson
+    import ftdcwrite
+    import tests.test_logsummary as tl
+    t0 = datetime(2026, 7, 15, tzinfo=timezone.utc)
+    root = running["tmp"] / "roles"
+    names = ("server1.shard0:27017", "server2.shard0:27017")
+    for n, name in enumerate(names):
+        clock = iter(t0 + timedelta(seconds=10 * i) for i in range(1000))
+        member = root / f"node{n + 1}"
+        w = ftdcwrite.Writer(member / "diagnostic.data",
+                             lambda n=n: {"common": {"hostInfo": {"system": {"hostname": f"ip-10-0-0-{n}.internal"}}}},
+                             clock=lambda: next(clock))
+        for i in range(5):
+            w.add(bson.encode({"start": t0 + timedelta(seconds=10 * i), "shard": {
+                "replSetGetStatus": {"members": [{"name": m, "self": m == name} for m in names]}}}))
+        w.flush()
+        rotated = "Jul 15 00:00:20 ip-10-0-0-%d mongo[1]: " % n + tl.scan("2026-07-15T00:00:20.000+00:00")
+        (member / "mongo_log_36h.log").write_text(rotated + "\n")
+    archive = running["tmp"] / "roles.tar"
+    with tarfile.open(archive, "w") as t:
+        t.add(root, arcname=".")
+    status, r = upload(running, archive)
+    assert status == 200, r
+    assert sorted(m["member"] for m in r["members"]) == list(names)
+    assert sorted(g["member"] for g in r["logs"]) == ["ip-10-0-0-0", "ip-10-0-0-1"]

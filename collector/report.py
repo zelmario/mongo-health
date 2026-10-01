@@ -1843,6 +1843,11 @@ def page_history(cluster_id: str, older: list, fixed: list, now: datetime) -> st
 
 LOG_ROWS = 8
 
+# Incidents about scanning, where the rows that matter are the collection scans, whatever else
+# was costly at the time.
+SCAN_RULES = {"collection-scans-sustained", "query-targeting-poor"}
+SLOWMS_TIP = "db.setProfilingLevel(0, { slowms: 20 })"
+
 
 def log_section(g, logs: list[dict] | None, add_files: str | None) -> str:
     """The slow queries mongod logged on the affected members while this happened.
@@ -1871,6 +1876,19 @@ def log_section(g, logs: list[dict] | None, add_files: str | None) -> str:
         return ('<h2>What the log says</h2><p class="lede">No slow query in the log for this '
                 'window. mongod logs a query when it takes longer than slowms, 100 ms unless it '
                 'was changed, so faster ones are not here.</p>')
+    note = ""
+    if g.rule in SCAN_RULES:
+        scans = [r for r in rows if r["plan"].startswith("COLLSCAN")
+                 and not r["op"].endswith("change stream")]
+        rows = scans + [r for r in rows if r not in scans]
+        if not scans:
+            # Measured on a real set: 56 to 76 collection scans a second for hours, and not one
+            # in the log, because each took less than slowms. Without this the table's costliest
+            # index scans read as the answer to a question about collection scans.
+            note = (f'<p class="pattern">None of these collection scans took longer than '
+                    f'slowms (100 ms unless changed), so the log does not name them: they were '
+                    f'many and fast. To catch them, lower it for a while on the members, then '
+                    f'upload the log again: <code>{esc(SLOWMS_TIP)}</code></p>')
     body = []
     for r in rows[:LOG_ROWS]:
         per = lambda v: f"{v / r['n']:,.0f}" if r["n"] else "0"  # noqa: E731
@@ -1889,6 +1907,7 @@ def log_section(g, logs: list[dict] | None, add_files: str | None) -> str:
           <h2>What the log says</h2>
           <p class="lede">Slow queries mongod logged on {esc(name_nodes(g.nodes))} during this,
             costliest first. Field names only: the values in the filters are never kept.</p>
+          {note}
           <div class="scroll"><table class="logq">
             <thead><tr><th>Node</th><th>Collection</th><th>Operation</th><th>Filter</th>
               <th>Plan</th><th>Times</th><th>Examined each</th><th>Returned each</th>
