@@ -471,3 +471,9 @@ def test_muted_findings_are_settled_even_when_the_rest_is_only_context(tmp_path)
             (json.loads(l) for l in (base / "findings.jsonl").read_text().splitlines() if l)}
     assert rows["f1"]["notified_at"] is not None, "muted: settled"
     assert rows["f2"]["notified_at"] is None, "context: still waiting for something to travel with"
+
+
+def test_a_self_managed_cluster_is_not_told_about_atlas(tmp_path):
+    html = html_of(build_message("rs", [a_finding()], ["a@x"], "c@x", tmp_path, days=10.0,
+                                 atlas=False))
+    assert "Atlas" not in html and "mongod rotates its own" in html

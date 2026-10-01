@@ -155,3 +155,10 @@ def test_a_long_list_is_cut_to_the_first_three():
 
 def test_a_cluster_with_nothing_to_change_hears_nothing_about_it():
     assert "configured" not in body(compose("c1", [], 10, ["a@x"], SENDER, recommendations=[]))
+
+
+def test_a_self_managed_cluster_is_not_told_about_atlas():
+    """Seen on rs-local's note: 'Atlas keeps about 3 days' about a cluster Atlas never saw."""
+    text = body(compose("rs", [], 10, ["a@x"], SENDER, atlas=False))
+    assert "Atlas" not in text
+    assert "10 days of diagnostic history" in text

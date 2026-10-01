@@ -43,6 +43,9 @@ TEXT = {
     "rescued": "{days} days of diagnostic data rescued",
     "rescued_sub": ("Atlas keeps roughly {atlas} days and then deletes it. That window is now "
                     "yours, and it grows from here."),
+    "rescued_self": "diagnostic data held",
+    "rescued_self_sub": ("mongod keeps its own only up to a size limit and deletes the oldest; "
+                         "from here on, what it drops stays here."),
     "behaviour": "How this cluster behaves",
     # Says what the table is before it says how it was made. The previous version opened with
     # the sample count, which answers a question nobody had yet.
@@ -92,10 +95,19 @@ def load(base: Path) -> tuple[dict, list[dict], list[dict], dict]:
     spath = base / "series.json"
     if spath.exists():
         per_node = json.loads(spath.read_text())
-        # The profile describes the busiest node, so its shapes are the ones to draw.
+        # Back to NaN, once, here: every drawing below tests absence as `v == v`.
+        nan = float("nan")
+        for shapes in per_node.values():
+            for shape in shapes.values():
+                shape["v"] = [nan if v is None else v for v in shape.get("v", [])]
+        # The profile describes the busiest node, so its shapes are the ones to draw. A gap is
+        # NaN in the runner and null once it has been through JSON: both are absence. Testing
+        # only `v == v` let the nulls through, the comparison raised, and the cluster page --
+        # which treats a failed profile as no profile -- quietly lost the section.
         if per_node:
             busiest = max(per_node, key=lambda n: sum(
-                max((v for v in s["v"] if v == v), default=0) for s in per_node[n].values()))
+                max((v for v in s["v"] if v is not None and v == v), default=0)
+                for s in per_node[n].values()))
             series = per_node[busiest]
     return summary, findings, baseline, series
 
@@ -572,7 +584,7 @@ def sparkline(series: dict | None) -> str | None:
     """
     if not series or not series.get("t"):
         return None
-    values = [v for v in series["v"] if v == v]
+    values = [v for v in series["v"] if v is not None and v == v]
     if not values or max(values) == min(values):
         return None
 
@@ -586,7 +598,7 @@ def sparkline(series: dict | None) -> str | None:
 
 
 def render(summary: dict, findings: list[dict], baseline: list[dict],
-           series: dict, now: datetime) -> str:
+           series: dict, now: datetime, atlas: bool = True) -> str:
     nodes = summary.get("nodes") or []
     days = float(summary.get("days_of_raw_ftdc") or 0)
     samples = max((n["samples"] for n in nodes), default=0)
@@ -695,7 +707,9 @@ def render(summary: dict, findings: list[dict], baseline: list[dict],
 
   <div class="rescued">
     <b>{days:.1f}</b>
-    <span>{TEXT["rescued"].format(days=f"{days:.1f}")}. {TEXT["rescued_sub"].format(atlas=ATLAS_DAYS)}</span>
+    <span>{(TEXT["rescued"].format(days=f"{days:.1f}") + ". "
+            + TEXT["rescued_sub"].format(atlas=ATLAS_DAYS)) if atlas
+           else (f"{days:.1f} days of " + TEXT["rescued_self"] + ". " + TEXT["rescued_self_sub"])}</span>
   </div>
 
   {overview_html}
@@ -733,7 +747,11 @@ def main() -> int:
         return 2
 
     summary, findings, baseline, series = load(base)
-    args.out.write_text(render(summary, findings, baseline, series, datetime.now(timezone.utc)))
+    # "Rescued from Atlas" is only true of Atlas; the state records where the data came from.
+    state = json.loads((base / "state.json").read_text()) if (base / "state.json").exists() else {}
+    atlas = (state.get("source_kind") or "atlas") == "atlas"
+    args.out.write_text(render(summary, findings, baseline, series, datetime.now(timezone.utc),
+                               atlas=atlas))
     print(f"{args.out} · {len(build_profile(baseline))} profile rows · {len(findings)} finding(s)")
     return 0
 

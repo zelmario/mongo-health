@@ -325,3 +325,17 @@ def test_an_incident_is_not_its_own_precedent():
     page = render(summary(findings=1), [a_real_finding()], [], {}, NOW)
     assert "First time we have seen this" in page
     assert "has happened" not in page
+
+
+def test_gaps_that_came_through_json_do_not_sink_the_profile(tmp_path):
+    """NaN in the runner is null in series.json. Seen on rs-local: the comparison raised, and
+    the cluster page lost its behaviour section without a word."""
+    import json as _json
+    import profile as profile_mod
+    (tmp_path / "summary.json").write_text(_json.dumps({"nodes": []}))
+    (tmp_path / "series.json").write_text(_json.dumps({
+        "a": {"m": {"t": [0, 1, 2], "v": [None, 3.0, None]}},
+        "b": {"m": {"t": [0, 1, 2], "v": [1.0, None, 2.0]}}}))
+    _, _, _, series = profile_mod.load(tmp_path)
+    v = series["m"]["v"]
+    assert v[1] == 3.0 and v[0] != v[0] and v[2] != v[2], "the busiest node, gaps as NaN"

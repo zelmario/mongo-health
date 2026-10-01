@@ -56,6 +56,12 @@ TEXT = {
     # trouble, and a run whose findings are all informational sends no mail. Two correct
     # decisions that between them mean it would never reach anybody. A quiet week is exactly
     # when it is true and exactly when there is room to say it.
+    # A self-managed cluster has no Atlas deleting anything: mongod itself rotates its FTDC
+    # directory when it reaches a size limit. No number of days here, because that depends on
+    # the limit and the sampling rate, and a made-up figure is worse than none.
+    "history_self": "You now hold {days} of diagnostic history for this cluster. mongod keeps "
+                    "its own diagnostic data only up to a size limit and deletes the oldest; "
+                    "what it drops stays here.",
     "spare": "And one thing that is not a problem: {what}",
     # Settings stay true until somebody changes them, so they come back every week -- the
     # weekly note is the one place a standing fact can repeat without becoming an alarm.
@@ -103,7 +109,7 @@ CONFIG_LINES = 3
 
 def compose(cluster_id: str, incidents: list, days_held: float, recipients: list[str],
             sender: str, spare: dict | None = None,
-            recommendations: list | None = None) -> EmailMessage:
+            recommendations: list | None = None, atlas: bool = True) -> EmailMessage:
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = ", ".join(recipients)
@@ -139,7 +145,8 @@ def compose(cluster_id: str, incidents: list, days_held: float, recipients: list
             lines.append(TEXT["config_more"].format(n=len(warnings) - CONFIG_LINES))
         lines.append("")
     lines += [
-        (TEXT["history"].format(days=days(days_held), atlas=ATLAS_DAYS, extra=days(extra))
+        (TEXT["history_self"].format(days=days(days_held)) if not atlas
+         else TEXT["history"].format(days=days(days_held), atlas=ATLAS_DAYS, extra=days(extra))
          if round(extra) >= 1
          else TEXT["history_new"].format(days=days(days_held), atlas=ATLAS_DAYS)),
         "",
@@ -188,7 +195,8 @@ def main() -> int:
                       spare=spare_capacity(all_findings, int(datetime.now(timezone.utc)
                                                              .timestamp() * 1000)),
                       recommendations=recommend.evaluate(summary.get("nodes", []),
-                                                         datetime.now(timezone.utc).date()))
+                                                         datetime.now(timezone.utc).date()),
+                      atlas=(spec.get("source") or {}).get("type", "atlas") == "atlas")
         if args.send and smtp:
             import smtplib
             with smtplib.SMTP(smtp["host"], int(smtp.get("port", 587)), timeout=60) as server:

@@ -61,6 +61,8 @@ TEXT = {
     "episodes": "Episodes",
     "check": "What to check",
     "history_note": "You have {days} days of history for this cluster. Atlas keeps about {atlas}.",
+    "history_note_self": "You have {days} days of history for this cluster, kept here after "
+                         "mongod rotates its own.",
     "footer": "mongo-health · you are receiving this because this cluster is being monitored.",
     "no_chart": "This finding is the absence of data, not a value — there is no series to plot.",
 }
@@ -224,7 +226,7 @@ def incident_url(site: str | None, finding_id: str) -> str | None:
 
 def render_html(cluster_id: str, incidents: list, cids: dict[str, str],
                 days: float | None, context: dict | None = None,
-                site: str | None = None) -> str:
+                site: str | None = None, atlas: bool = True) -> str:
 
     blocks = []
     for m in incidents[:DETAILED_IN_MAIL]:
@@ -325,7 +327,8 @@ def render_html(cluster_id: str, incidents: list, cids: dict[str, str],
     history = ""
     if days:
         banked = f'<b style="color:{SIGNAL}">{days:.0f}</b>'
-        note = TEXT["history_note"].format(days=banked, atlas=ATLAS_DAYS)
+        note = (TEXT["history_note"].format(days=banked, atlas=ATLAS_DAYS) if atlas
+                else TEXT["history_note_self"].format(days=banked))
         history = (
             f'<p style="margin:16px 0 0;font:13px/1.6 -apple-system,system-ui,sans-serif;'
             f'color:{INK_SOFT};">{note}</p>'
@@ -420,7 +423,7 @@ def render_text(cluster_id: str, incidents: list, context: dict | None = None,
 def build_message(cluster_id: str, findings: list[dict], recipients: list[str],
                   sender: str, work: Path, days: float | None,
                   all_findings: list[dict] | None = None,
-                  site: str | None = None) -> EmailMessage:
+                  site: str | None = None, atlas: bool = True) -> EmailMessage:
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = ", ".join(recipients)
@@ -444,7 +447,7 @@ def build_message(cluster_id: str, findings: list[dict], recipients: list[str],
     context = {m.from_ms: changes_before(all_findings or findings, m.from_ms)
                for m in incidents}
     msg.set_content(render_text(cluster_id, incidents, context, site))
-    msg.add_alternative(render_html(cluster_id, incidents, cids, days, context, site),
+    msg.add_alternative(render_html(cluster_id, incidents, cids, days, context, site, atlas),
                         subtype="html")
 
     html_part = msg.get_payload()[1]
@@ -526,7 +529,8 @@ def notify_cluster(spec: dict, root: Path, outbox: Path, send: bool,
     everything = [json.loads(line)
                   for line in (base / "findings.jsonl").read_text().splitlines() if line]
     site = f"{spec['report_url']}/{quote(cluster_id, safe='')}" if spec.get("report_url") else None
-    msg = build_message(cluster_id, pending, recipients, sender, work, days, everything, site)
+    msg = build_message(cluster_id, pending, recipients, sender, work, days, everything, site,
+                        atlas=(spec.get("source") or {}).get("type", "atlas") == "atlas")
 
     if not send:
         # Stamped rather than a fixed `message.eml`: an outbox that silently overwrites
