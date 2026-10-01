@@ -404,3 +404,68 @@ def test_a_new_connected_cluster_says_its_samples_are_arriving(tmp_path):
     index = (build(tmp_path, [spec]) / "index.html").read_text()
     assert "Waiting for the first data" in index and "2 members" in index
     assert "Not being watched" not in index
+
+
+# ------------------------------------------------------------------ every time it happened
+
+MIN = 60_000
+
+
+def at_utc(day, hour, minute):
+    return int(datetime(2026, 8, day, hour, minute, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+def test_a_storm_seen_by_three_members_is_one_time_not_three(tmp_path):
+    """Counted as rows, "this has happened 12 times" on a three-member set meant four."""
+    before = [finding(f"{d}{n}", node=n, at=MS - d * DAY) for d in (3, 5) for n in ("a", "b", "c")]
+    spec = cluster(tmp_path / "data", before + [finding("now", node="a", at=MS - HOUR)])
+    page = (build(tmp_path, [spec]) / "prod" / "index.html").read_text()
+    assert "This has happened 3 times on this cluster." in page
+    assert 'href="incidents/now.html#times">See all 3</a>' in page
+
+
+def test_every_time_is_listed_with_a_link_to_it(tmp_path):
+    spec = cluster(tmp_path / "data", [finding("old", at=MS - 5 * DAY),
+                                       finding("now", at=MS - HOUR)])
+    page = (build(tmp_path, [spec]) / "prod" / "incidents" / "now.html").read_text()
+    assert 'id="times"' in page and "Same check, same cluster: 2 times." in page
+    assert '<a href="old.html">' in page
+    assert '<figure class="tod">' in page
+
+
+def test_nine_starts_at_two_and_thirty_two_past_are_called_a_schedule():
+    """Read-ticket incidents on a real replica set, as they started."""
+    starts = [at_utc(26, 11, 2), at_utc(27, 14, 2), at_utc(27, 16, 32), at_utc(28, 12, 2),
+              at_utc(28, 23, 35), at_utc(29, 11, 33), at_utc(29, 16, 33), at_utc(30, 0, 32),
+              at_utc(30, 12, 2)]
+    p = report.schedule_pattern(starts)
+    assert p["period"] == 30 and p["hits"] == 9
+    assert p["text"].startswith("9 of 9 started within 3 minutes of :02 or :32.")
+
+
+def test_a_nightly_job_is_said_as_a_time_of_day():
+    starts = [at_utc(d, 2, 5 + d % 4) for d in range(1, 8)]
+    p = report.schedule_pattern(starts)
+    assert p["period"] == 1440 and "02:0" in p["text"] and "UTC" in p["text"]
+
+
+def test_the_strongest_schedule_wins_over_the_first_that_passes():
+    """Five of eight at :33 past the hour is true; eight of eight at :02 or :32 is the fact."""
+    starts = [at_utc(1, h, m) for h, m in
+              ((1, 2), (3, 33), (5, 2), (7, 33), (9, 32), (11, 33), (13, 3), (15, 33))]
+    assert report.schedule_pattern(starts)["period"] == 30
+
+
+def test_a_few_starts_that_happen_to_line_up_are_not_a_pattern():
+    """Four of five inside some six-minute window of the hour happens about one time in twenty."""
+    starts = [at_utc(1, 1, 4), at_utc(2, 5, 6), at_utc(3, 9, 3), at_utc(4, 13, 5),
+              at_utc(5, 17, 40)]
+    assert report.schedule_pattern(starts) is None
+
+
+def test_starts_spread_across_the_day_are_not_a_pattern():
+    """Spread evenly over the minutes of the hour and the hours of the day. Drawn at random
+    instead, a seed can cluster them for real -- one did, 17 of 30 near :07 -- and the
+    detector is then right to say so."""
+    starts = [at_utc(1 + i % 28, (i * 7) % 24, (i * 23) % 60) for i in range(30)]
+    assert report.schedule_pattern(starts) is None

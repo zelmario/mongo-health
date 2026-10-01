@@ -36,7 +36,7 @@ import resolutions
 import catalog
 import recommend
 import sizing
-from profile import times_before
+from profile import earlier_incidents
 from watchdog import STALE_AFTER_HOURS
 
 CSS = """
@@ -866,6 +866,16 @@ img.shape { cursor: zoom-in; }
 .recurrence { margin-top: 0.7rem; padding: 0.5rem 0.7rem; background: var(--signal-soft);
               border-left: 2px solid var(--signal); color: var(--signal);
               font-size: 0.8125rem; font-weight: 600; }
+.recurrence a { color: var(--ink); margin-left: .3rem; }
+.tod { margin: .4rem 0 .8rem; max-width: 40rem; }
+.tod figcaption { font-size: .8125rem; color: var(--ink-faint); }
+.tod svg { width: 100%; height: auto; display: block; }
+.tod .axis, .tod .tick { stroke: var(--edge); stroke-width: 1; }
+.tod text { fill: var(--ink-faint); font-size: 10px; text-anchor: middle; }
+.tod circle.then { fill: var(--ink-soft); opacity: .75; }
+.tod circle.now { fill: var(--signal); }
+.pattern { border-left: 3px solid var(--signal); padding: .4rem .8rem; margin: 0 0 1rem;
+           background: var(--signal-soft); }
 .recurrence.first { background: transparent; border-left-color: var(--edge);
                     color: var(--ink-faint); font-weight: 400; }
 
@@ -1291,10 +1301,93 @@ def is_change(f: dict) -> bool:
     return f.get("rule") == "setting-changed"
 
 
-def recurrence(earlier: list[dict]) -> str:
+SHOWN_TIMES = 50
+
+# When a check keeps firing at the same time of day, or the same minutes of the hour, that is
+# the signature of something on a schedule. Searching every minute of the period for the best
+# window finds one by chance easily -- four of five starts inside some six-minute window of the
+# hour happens about one time in twenty -- so a window is only called a pattern when that many
+# starts falling in it by chance, anywhere in the period, is under one in a hundred.
+SCHEDULES = [(1440, 15), (60, 3), (30, 3)]
+PATTERN_AT_LEAST, PATTERN_CHANCE = 4, 0.01
+
+
+def _chance(hits: int, n: int, share: float, tries: int) -> float:
+    """How likely `hits` of `n` uniform starts land in a window covering `share` of the
+    period, at the best of `tries` positions (Bonferroni: generous, so it errs towards
+    saying nothing)."""
+    from math import comb
+
+    tail = sum(comb(n, k) * share ** k * (1 - share) ** (n - k) for k in range(hits, n + 1))
+    return min(1.0, tail * tries)
+
+
+def schedule_pattern(starts_ms: list[int]) -> dict | None:
+    """The schedule these starts keep, if one is strong enough not to be chance.
+
+    Returns {"period", "at" (minutes into the period), "hits", "text"}. Of the schedules that
+    pass, the least likely to be chance wins: nine of nine at :02 or :32 is said as such, not
+    as the five of them that happen to be at :02.
+    """
+    n = len(starts_ms)
+    if n < PATTERN_AT_LEAST:
+        return None
+    minutes = [(ms // 60000) % 1440 for ms in starts_ms]
+    found = []
+    for period, window in SCHEDULES:
+        def off(m, c):
+            d = abs(m % period - c)
+            return min(d, period - d)
+        best = max(range(period), key=lambda c: (sum(off(m, c) <= window for m in minutes),
+                                                 -sum(min(off(m, c), window) for m in minutes)))
+        hits = sum(off(m, best) <= window for m in minutes)
+        chance = _chance(hits, n, (2 * window + 1) / period, period)
+        if hits >= PATTERN_AT_LEAST and chance < PATTERN_CHANCE:
+            found.append((chance, -period, period, window, best, hits))
+    if not found:
+        return None
+    _, _, period, window, best, hits = min(found)
+    if period == 1440:
+        at = f"{best // 60:02d}:{best % 60:02d} UTC"
+    elif period == 60:
+        at = f":{best:02d} past the hour"
+    else:
+        at = f":{best:02d} or :{best + 30:02d}"
+    return {"period": period, "at": best, "hits": hits,
+            "text": f"{hits} of {n} started within {window} minutes of {at}. That is the shape "
+                    f"a scheduled job leaves: a cron, a backup, a batch load."}
+
+
+def time_of_day(starts_ms: list[int], pattern: dict | None) -> str:
+    """Where in the day each one started, or where in the hour when that is the pattern. The
+    newest is this incident, and is drawn in the accent."""
+    hourly = pattern is not None and pattern["period"] < 1440
+    span = 60 if hourly else 1440
+    ticks = ([(0, ":00"), (15, ":15"), (30, ":30"), (45, ":45"), (60, ":00")] if hourly else
+             [(h * 60, f"{h:02d}h") for h in (0, 6, 12, 18, 24)])
+    left, width = 10, 580
+    x = lambda minute: left + width * minute / span  # noqa: E731
+    marks = "".join(f'<line class="tick" x1="{x(m):.1f}" x2="{x(m):.1f}" y1="20" y2="25"/>'
+                    f'<text x="{x(m):.1f}" y="38">{label}</text>' for m, label in ticks)
+    dots = []
+    for i, ms in enumerate(starts_ms):
+        minute = ((ms / 60000) % span) if hourly else ((ms / 60000) % 1440)
+        dots.append(f'<circle class="{"now" if i == 0 else "then"}" cx="{x(minute):.1f}" '
+                    f'cy="{12 - (i % 3) * 3}" r="4"><title>{esc(when_ms(ms))}</title></circle>')
+    name = "Minute of the hour" if hourly else "Time of day, UTC"
+    return (f'<figure class="tod"><figcaption>{name}</figcaption>'
+            f'<svg viewBox="0 0 600 42" role="img" aria-label="{name} of each start">'
+            f'<line class="axis" x1="{left}" x2="{left + width}" y1="20" y2="20"/>'
+            f'{marks}{"".join(dots[1:])}{dots[0]}</svg></figure>')
+
+
+def recurrence(earlier: list, every: str = "") -> str:
+    """`earlier` are incidents, newest first; `every` is where the full list is."""
     if earlier:
-        return (f'<div class="recurrence">This has happened {len(earlier) + 1} times on this '
-                f'cluster. The one before was {esc(when_ms(earlier[0]["worstFromMs"]))}.</div>')
+        n = len(earlier) + 1
+        link = f' <a href="{esc(every)}">See all {n}</a>' if every else ""
+        return (f'<div class="recurrence">This has happened {n} times on this cluster. The one '
+                f'before was {esc(when_ms(earlier[0].from_ms))}.{link}</div>')
     # Said explicitly rather than left blank: "first time we have seen this" is information
     # too, and its absence would read as missing data.
     return '<div class="recurrence first">First time we have seen this on this cluster.</div>'
@@ -1382,7 +1475,8 @@ def card(g, cluster_id: str, findings: list[dict], chart_file, muted: set[str]) 
              if g.seconds_in_state else ''}
             {episodes_fact(g)}
           </div>
-          {recurrence(times_before(findings, g.rule, g.from_ms))}
+          {recurrence(earlier_incidents(findings, g.rule, g.from_ms),
+                      f"incidents/{f['id']}.html#times")}
           <details>
             <summary>What to check next</summary>
             <p>{esc(f.get('check') or '')}</p>
@@ -1741,7 +1835,7 @@ def page_incident(cluster_id: str, g, findings: list[dict], chart_file, now: dat
     figure, figure_means = extent(g.worst, g.seconds_in_state)
     # A change is a moment, not a condition: "0s in state" and a peak say nothing about it.
     change = g.rule == "setting-changed"
-    earlier = times_before(findings, g.rule, g.from_ms)
+    earlier = earlier_incidents(findings, g.rule, g.from_ms)
     changed = changes_before(findings, g.from_ms)
 
     charts = []
@@ -1763,23 +1857,30 @@ def page_incident(cluster_id: str, g, findings: list[dict], chart_file, now: dat
 
     if earlier:
         rows = "".join(
-            f"<tr><td>{esc(when_ms(e['worstFromMs']))}</td>"
-            f"<td>{esc(how_long_ago(e['worstFromMs']))}</td>"
-            f"<td>{esc(duration(e.get('secondsInState')))}</td>"
-            f"<td class=\"muted\">{esc(e['node'].split('.')[0])}</td></tr>"
-            for e in earlier[:25])
+            f'<tr><td><a href="{esc(e.worst["id"])}.html">{esc(when_ms(e.from_ms))}</a></td>'
+            f"<td>{esc(how_long_ago(e.from_ms))}</td>"
+            f"<td>{esc(duration(e.seconds_in_state))}</td>"
+            f'<td class="muted">{esc(name_nodes(e.nodes))}</td></tr>'
+            for e in earlier[:SHOWN_TIMES])
+        more = (f'<p class="hint">And {len(earlier) - SHOWN_TIMES} older, not listed.</p>'
+                if len(earlier) > SHOWN_TIMES else "")
+        starts = [g.from_ms] + [e.from_ms for e in earlier]
+        pattern = schedule_pattern(starts)
         history = f"""
-        <h2>Every time this has happened</h2>
-        <p class="lede">Same check, same cluster.</p>
+        <h2 id="times">Every time this has happened</h2>
+        <p class="lede">Same check, same cluster: {len(starts)} times.</p>
+        {time_of_day(starts, pattern)}
+        {f'<p class="pattern">{esc(pattern["text"])}</p>' if pattern else ''}
         <div class="scroll"><table>
-          <thead><tr><th>When</th><th></th><th>Duration</th><th>Node</th></tr></thead>
+          <thead><tr><th>When</th><th></th><th>Duration</th><th>Nodes</th></tr></thead>
           <tbody>
             <tr class="current"><td>{esc(when_ms(g.from_ms))}</td>
               <td>{esc(how_long_ago(g.from_ms))}</td>
               <td>{esc(duration(g.seconds_in_state))}</td>
               <td class="muted">this one</td></tr>
             {rows}
-          </tbody></table></div>"""
+          </tbody></table></div>
+        {more}"""
     else:
         history = """
         <h2>Every time this has happened</h2>
@@ -1793,13 +1894,13 @@ def page_incident(cluster_id: str, g, findings: list[dict], chart_file, now: dat
     lead = []
     if earlier:
         last = earlier[0]
-        lead.append((last["worstFromMs"], f"""
+        lead.append((last.from_ms, f"""
         <li>
-          <p class="stamp">{esc(when_ms(last["worstFromMs"]))}
-            <span>{esc(how_long_ago(last["worstFromMs"]))}</span></p>
+          <p class="stamp">{esc(when_ms(last.from_ms))}
+            <span>{esc(how_long_ago(last.from_ms))}</span></p>
           <p class="what earlier">The time before this — it ran
-            {esc(duration(last.get("secondsInState")))} on
-            {esc(last["node"].split(".")[0])}.
+            {esc(duration(last.seconds_in_state))} on
+            {esc(name_nodes(last.nodes))}.
             {f'One of {len(earlier) + 1} times on record.' if len(earlier) > 1 else ''}</p>
         </li>"""))
     for c in changed:

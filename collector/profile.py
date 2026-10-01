@@ -169,6 +169,17 @@ def times_before(findings: list[dict], rule: str, before_ms: int) -> list[dict]:
     return sorted(out, key=lambda f: -int(f["worstFromMs"]))
 
 
+def earlier_incidents(findings: list[dict], rule: str, before_ms: int) -> list:
+    """The earlier times as incidents, newest first, grouped the way the site groups them.
+
+    Counted as rows, one storm seen by three members was three times, and "this has happened
+    12 times" on a three-member set meant four.
+    """
+    from group import group
+
+    return sorted(group(times_before(findings, rule, before_ms)), key=lambda g: -g.from_ms)
+
+
 def when_day(ms) -> str:
     return datetime.fromtimestamp(int(ms) / 1000, timezone.utc).strftime("%d %b %Y · %H:%M UTC")
 
@@ -661,10 +672,10 @@ def render(summary: dict, findings: list[dict], baseline: list[dict],
             # The one thing a service without history cannot say, and the reason this report is
             # worth more on day thirty than on day one. Said explicitly when there is no
             # precedent too: left blank, "first time" would read as a value that failed to load.
-            earlier = times_before(findings, g.rule, g.from_ms)
+            earlier = earlier_incidents(findings, g.rule, g.from_ms)
             if earlier:
                 again = TEXT["again"].format(n=len(earlier) + 1,
-                                             when=when_day(earlier[0]["worstFromMs"]))
+                                             when=when_day(earlier[0].from_ms))
                 again_html = f'<div class="again">{esc(again)}</div>'
             else:
                 again_html = f'<div class="again first">{esc(TEXT["first"])}</div>'
