@@ -291,6 +291,10 @@ MEASURES = {
     "election-held":           ("Replica set term", "count", True),
     "oversized-cluster":       ("Busiest moment observed", "percent", True),
     "replication-lag":         ("Spread between members", "ms", True),
+    "disk-space-low":          ("Free space on the data disk", "percent", False),
+    "disk-space-critical":     ("Free space on the data disk", "percent", False),
+    "oplog-window-short":      ("Oplog window", "seconds", False),
+    "oplog-window-critical":   ("Oplog window", "seconds", False),
     "command-latency-high":    ("Time per command", "us", True),
 }
 
@@ -318,6 +322,11 @@ def unit_value(value, unit) -> str:
     """A number with its unit attached the way a person writes it: "4.9%", not "4.9percent"."""
     if value is None:
         return "—"
+    if unit == "seconds" and abs(float(value)) >= 120:
+        # A window of 86,400 s is a day; nobody sizes an oplog in seconds.
+        v = float(value)
+        return (f"{v / 3600:.1f}".rstrip("0").rstrip(".") + " h" if abs(v) >= 7200
+                else f"{v / 60:.0f} min")
     if unit == "bytes":
         # "1610612736 bytes" is a number to convert; "1.5 GiB" is the fact.
         step, name = next((s, n) for s, n in _STEPS if abs(float(value)) >= s or s == 1)

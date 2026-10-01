@@ -891,6 +891,53 @@ export const RULES: readonly Rule[] = [
   },
 
   {
+    id: 'oplog-window-short',
+    title: 'The oplog holds less than a day of writes',
+    severity: 'warning',
+    // The window a member actually has: how far back the last `maxSize` bytes written to the
+    // oplog reach. Not size over the current rate, which on a real Atlas cluster swung from
+    // 1,000 hours to 19 inside a day. Measured: Cluster1 never went under 4,479 h; rs-local,
+    // with a 512 MB oplog and a load generator writing 2.5 MB/s, spent 36.7 h under a day.
+    //
+    // A day because it is the outage people plan for -- a member down overnight, a host
+    // rebuilt, a maintenance window -- and an hour of it sustained because the window only
+    // recovers at the speed of the clock: once the writes stop it grows back by one hour per
+    // hour, so a short dip after a burst is the same oplog, not a new problem.
+    metric:
+      'window(local.oplog.rs.stats.storageStats.wiredTiger.cursor.insert key and value bytes, local.oplog.rs.stats.storageStats.maxSize)',
+    op: '<=',
+    threshold: 86_400,
+    sustainMs: 3_600_000,
+    toleranceMs: 300_000,
+    unit: 'seconds',
+    what: 'The oplog holds less than a day of writes: a member away for longer than that cannot catch up and needs a full initial sync.',
+    check:
+      'The oplog is too small for the write load. Grow it with replSetResizeOplog on every ' +
+      'member -- online, no restart -- or set oplogMinRetentionHours so it keeps a minimum ' +
+      'time rather than a size. If the load itself is the surprise, look at what is writing: ' +
+      'oplog-churn reports writes that put far more into the oplog than their count suggests.',
+  },
+  {
+    id: 'oplog-window-critical',
+    title: 'The oplog holds less than an hour of writes',
+    severity: 'critical',
+    // Under an hour a restart, a slow initial sync of another member or a network blip is
+    // enough to push a secondary off the end. rs-local spent 19 h there, 8.2 h unbroken.
+    metric:
+      'window(local.oplog.rs.stats.storageStats.wiredTiger.cursor.insert key and value bytes, local.oplog.rs.stats.storageStats.maxSize)',
+    op: '<=',
+    threshold: 3_600,
+    sustainMs: 900_000,
+    toleranceMs: 120_000,
+    unit: 'seconds',
+    what: 'The oplog holds less than an hour of writes: a secondary that stops for longer than that falls off the end and needs a full initial sync.',
+    check:
+      'Grow the oplog now with replSetResizeOplog, on every member. Until then avoid anything ' +
+      'that takes a member out -- restarts, rolling upgrades, rebuilding a host -- because it ' +
+      'will not come back on its own.',
+  },
+
+  {
     id: 'connection-storm',
     title: 'Clients are reconnecting in a storm',
     severity: 'warning',

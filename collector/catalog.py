@@ -49,6 +49,7 @@ AREA_OF = {
     "disk-space-low": "storage", "disk-space-critical": "storage",
     "member-unhealthy": "replication", "replication-lag": "replication",
     "oplog-backlog": "replication", "oplog-churn": "replication",
+    "oplog-window-short": "replication", "oplog-window-critical": "replication",
     "query-targeting-poor": "queries", "collection-scans-sustained": "queries",
     "sorts-spilling-to-disk": "queries", "sorts-spilling-burst": "queries",
     "write-conflicts": "queries", "cursors-leaking": "queries", "ttl-storm": "queries",
@@ -64,11 +65,13 @@ SIBLING = {"write-tickets-saturated": "read-tickets-saturated",
            "disk-space-critical": "disk-space-low"}
 
 UNIT = {"percent": "%", "ms": " ms", "us": " µs", "bytes": " bytes", "per-sec": "/s",
-        "count": ""}
+        "count": "", "seconds": ""}
 
 
 def _seconds(ms: int) -> str:
     s = ms / 1000
+    if s >= 3600 and s % 3600 == 0:
+        return f"{s / 3600:.0f} h"
     return f"{s / 60:.0f} min" if s >= 120 and s % 60 == 0 else f"{s:.0f} s"
 
 
@@ -77,6 +80,8 @@ def when_it_speaks(r: dict) -> str:
     op = "≥" if r["op"] == ">=" else "≤"
     value = f"{r['threshold']:,}".rstrip("0").rstrip(".") if isinstance(r["threshold"], float) \
         else f"{r['threshold']:,}"
+    if r["unit"] == "seconds":  # a duration reads as one: "24 h", not "86,400"
+        value = _seconds(r["threshold"] * 1000)
     text = f"{op} {value}{UNIT.get(r['unit'], ' ' + r['unit'])} for {_seconds(r['sustainMs'])}"
     if r["toleranceMs"]:
         text += f", dips of up to {_seconds(r['toleranceMs'])} tolerated"

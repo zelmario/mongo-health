@@ -70,6 +70,8 @@ function mapLeaves(e: Expr, f: (path: string) => string): Expr {
       return { fn: 'sum', args: e.args.map((a) => mapLeaves(a, f)) };
     case 'spread':
       return { fn: 'spread', args: e.args.map((a) => mapLeaves(a, f)) };
+    case 'window':
+      return { fn: 'window', counter: mapLeaves(e.counter, f), size: mapLeaves(e.size, f) };
   }
 }
 
@@ -85,6 +87,8 @@ function children(e: Expr): Expr[] {
       return [e.num, e.den];
     case 'diff':
       return [e.a, e.b];
+    case 'window':
+      return [e.counter, e.size];
     case 'sum':
     case 'spread':
       return e.args;
@@ -106,6 +110,8 @@ function withChildren(e: Expr, kids: Expr[]): Expr {
       return { fn: 'div', num: kids[0]!, den: kids[1]! };
     case 'diff':
       return { fn: 'diff', a: kids[0]!, b: kids[1]! };
+    case 'window':
+      return { fn: 'window', counter: kids[0]!, size: kids[1]! };
     case 'sum':
       return { fn: 'sum', args: kids };
     case 'spread':

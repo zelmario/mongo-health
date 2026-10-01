@@ -44,7 +44,7 @@ import { ALARM_COUNTERS, WATCHED_SETTINGS, alarmFindings, changeFindings,
          electionFindings, gapFindings, peerFindings }
   from '../src/insights/events.js';
 import type { SeriesQuery } from '../src/data/reader.js';
-import { unitOfPath } from '../src/data/expr.js';
+import { parseExpr, unitOf, unitOfPath } from '../src/data/expr.js';
 import { cadenceAwareRate } from '../src/data/cadence.js';
 import { DAILY_FORMAT, DAY_MS, Histogram, dayChart, dayName, dayStart, mergeCharts,
          type DayChart, type DaySummary, type Quantiles } from '../src/data/daily.js';
@@ -600,9 +600,12 @@ async function chartFor(
       }
       drawn.push({
         // The last path component reads well enough as a legend entry: "available",
-        // "totalTickets", "maximum bytes configured".
-        label: DISPLAY_LABELS[metric] ?? metric.split('.').pop() ?? metric,
-        unit: unitOfPath(options[0]!),
+        // "totalTickets", "maximum bytes configured". Not for an expression, where it is
+        // "maxSize)" -- the chart title names a lone series anyway.
+        label: DISPLAY_LABELS[metric] ?? (metric.includes('(') ? '' : metric.split('.').pop()!),
+        // The unit of the whole expression, not of its text read as one path: that put the
+        // oplog window, in seconds, on an axis in bytes because the word "bytes" was in it.
+        unit: unitOf(parseExpr(options[0]!)),
         // NaN survives on purpose: a gap in the capture must show as a break in the line,
         // not as a line drawn straight through it.
         v: Array.from(series.mean).map((x) =>

@@ -18,6 +18,7 @@
  *   div(rate(latency), rate(ops))                      nested: average latency per op
  *   scale(rate(sys.cpu.user_ms), 0.1)                  ms/s -> % of one core
  *   sum(a, b, c)   diff(a, b)
+ *   window(oplog insert bytes, oplog maxSize)         seconds back the last maxSize bytes reach
  *
  * Evaluation happens in the reader at FULL resolution, before downsampling. Computing a rate
  * from already-bucketed means would smear exactly the short spikes the envelope exists to
@@ -55,13 +56,24 @@ export type Expr =
    */
   | { readonly fn: 'spread'; readonly args: Expr[] }
   | { readonly fn: 'diff'; readonly a: Expr; readonly b: Expr }
-  | { readonly fn: 'scale'; readonly arg: Expr; readonly k: number };
+  | { readonly fn: 'scale'; readonly arg: Expr; readonly k: number }
+  /**
+   * How far back in time the last `size` units of a cumulative counter reach, in seconds.
+   *
+   * Written for the oplog window: the counter is the bytes inserted into `local.oplog.rs`, the
+   * size is the oplog's `maxSize`, and the answer is how long a member can be away and still
+   * catch up. Size divided by the current rate answers a different question -- how long the
+   * oplog would last if this second went on for ever -- and on a real capture it swung from
+   * 1,000 hours to 19 within a day. The window a secondary actually has is the bytes it would
+   * have to find, which is the history, not the present.
+   */
+  | { readonly fn: 'window'; readonly counter: Expr; readonly size: Expr };
 
 export class ExprError extends Error {
   override readonly name = 'ExprError';
 }
 
-const FUNCTIONS = new Set(['rate', 'pct', 'div', 'diff', 'scale', 'sum', 'spread']);
+const FUNCTIONS = new Set(['rate', 'pct', 'div', 'diff', 'scale', 'sum', 'spread', 'window']);
 
 /* ------------------------------------------------------------------ parse ---- */
 
@@ -153,6 +165,9 @@ export function parseExpr(text: string): Expr {
       // two members are readable.
       if (args.length < 1) throw new ExprError('spread() takes at least 1 argument');
       return { fn: 'spread', args: args.map(parseExpr) };
+    case 'window':
+      need(2);
+      return { fn: 'window', counter: parseExpr(args[0]!), size: parseExpr(args[1]!) };
     default:
       throw new ExprError(`unknown function "${fn}"`);
   }
@@ -171,6 +186,8 @@ export function exprPaths(e: Expr): string[] {
       return [...exprPaths(e.num), ...exprPaths(e.den)];
     case 'diff':
       return [...exprPaths(e.a), ...exprPaths(e.b)];
+    case 'window':
+      return [...exprPaths(e.counter), ...exprPaths(e.size)];
     case 'sum':
     case 'spread':
       return e.args.flatMap(exprPaths);
@@ -345,7 +362,67 @@ export function evaluate(
       }
       return out;
     }
+    case 'window':
+      return windowOf(t, evaluate(e.counter, t, raw), evaluate(e.size, t, raw));
   }
+}
+
+/**
+ * The least history `window()` will judge from. Under an hour the bytes seen are one burst or
+ * one lull, and extrapolating either to a size of gigabytes invents the answer.
+ */
+const WINDOW_MIN_LOOKBACK_MS = 3_600_000;
+
+/**
+ * For each sample, the seconds back to where the last `size` bytes of the counter begin.
+ *
+ * The counter is made monotonic first by summing only its positive steps: a restart sets it
+ * back to zero, and the oplog did not empty because the process did. A step across a gap in
+ * the capture is kept -- the bytes really went in, only when is unknown, and the timestamps on
+ * either side are real.
+ *
+ * When the history reaches back past `size`, the answer is exact. When it does not -- the
+ * window is longer than what is loaded -- it is the size over the average rate across all of
+ * it, which is the best the data allows and is the same formula at the boundary, so the series
+ * does not jump where one gives way to the other. Under an hour of history it is NaN.
+ *
+ * An oplog with `oplogMinRetentionHours` set grows past `maxSize` to honour it, and this reads
+ * shorter than the truth there. It errs towards warning, which is the side a rule can afford.
+ */
+function windowOf(t: Float64Array, counter: Float64Array, size: Float64Array): Float64Array {
+  const n = t.length;
+  const out = new Float64Array(n).fill(NaN);
+  const cum = new Float64Array(n);
+  for (let i = 1; i < n; i++) {
+    const a = counter[i - 1]!;
+    const b = counter[i]!;
+    const dv = Number.isNaN(a) || Number.isNaN(b) ? 0 : unwrap(b - a);
+    cum[i] = cum[i - 1]! + (dv > 0 ? dv : 0);
+  }
+  let j = 0; // the oldest sample still inside the last `size` bytes
+  for (let i = 0; i < n; i++) {
+    const cap = size[i]!;
+    if (!(cap > 0) || Number.isNaN(counter[i]!)) continue;
+    // The newest j for which everything since still totals at least `size`.
+    while (j + 1 <= i && cum[i]! - cum[j + 1]! >= cap) j++;
+    if (j > i) j = i;
+    const filled = cum[i]! - cum[j]!;
+    const span = t[i]! - t[j]!;
+    if (filled >= cap && span > 0) {
+      // Interpolate inside the step that crosses the boundary, so the answer moves smoothly
+      // rather than in whole sampling intervals.
+      const over = filled - cap;
+      const step = j + 1 <= i ? cum[j + 1]! - cum[j]! : 0;
+      const back = step > 0 ? (over / step) * (t[j + 1]! - t[j]!) : 0;
+      out[i] = (span - back) / 1000;
+      continue;
+    }
+    const lookback = t[i]! - t[0]!;
+    if (lookback < WINDOW_MIN_LOOKBACK_MS) continue;
+    const total = cum[i]!;
+    out[i] = total > 0 ? (cap * (lookback / 1000)) / total : NaN;
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ units ---- */
@@ -478,6 +555,8 @@ export function unitOf(e: Expr): Unit {
       // A difference between two values of the same unit keeps that unit. Wall-clock stamps
       // are epoch milliseconds, so the distance between two of them is milliseconds.
       return unitOf(e.args[0]!);
+    case 'window':
+      return 'seconds';
   }
 }
 
@@ -500,5 +579,7 @@ export function exprToString(e: Expr): string {
       return `sum(${e.args.map(exprToString).join(', ')})`;
     case 'spread':
       return `spread(${e.args.map(exprToString).join(', ')})`;
+    case 'window':
+      return `window(${exprToString(e.counter)}, ${exprToString(e.size)})`;
   }
 }

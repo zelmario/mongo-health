@@ -15,6 +15,7 @@ are in [rules.md](rules.md).
 
 | Trouble | Check |
 |---|---|
+| The data disk filling up | `disk-space-low`, `disk-space-critical` |
 | Execution tickets saturated or exhausted | `read-/write-tickets-saturated`, `-exhausted` |
 | Operations queueing | `read-/write-queue-building` |
 | Cache under pressure, eviction falling behind | `cache-dirty-high`, `cache-full`, `eviction-by-app-threads`, `eviction-aggressive` |
@@ -22,6 +23,7 @@ are in [rules.md](rules.md).
 | Slow checkpoints, slow disk | `checkpoint-slow`, `disk-read-/write-latency-high` |
 | Members down or lagging, elections | `member-unhealthy`, `replication-lag`, `election-held` |
 | Replication pushing back on the primary | `flow-control-engaged`, `oplog-backlog`, `oplog-churn` |
+| The oplog too short to survive an outage | `oplog-window-short`, `oplog-window-critical` |
 | Bad queries: scans, poor targeting, sorts on disk | `collection-scans-sustained`, `query-targeting-poor`, `sorts-spilling-*` |
 | Contention, leaked cursors, TTL storms | `write-conflicts`, `cursors-leaking`, `ttl-storm` |
 | Connections near the limit, reconnect storms | `connections-high`, `connection-storm` |
@@ -64,9 +66,12 @@ the member needs a full initial sync — hours, on a large set — and nothing s
   `…wiredTiger.cursor.insert key and value bytes`. Window = size ÷ rate.
 - **Measured:** Cluster1 ~1,000 h at its usual rate, 19 h at its busiest. rs-local, under the
   load generator, fell to **minutes**: p50 0.7 h, minimum 0.
-- **Proposal:** the window averaged over an hour, under 24 h sustained for an hour → warning,
-  and under the longest outage seen on this cluster → critical. The instantaneous rate swings
-  too much to judge on.
+- **Done (oplog-window-short, oplog-window-critical).** Not size ÷ rate: a new engine function,
+  `window()`, measures how far back the last `maxSize` bytes really reach. Read the way a run
+  reads it (a day of history), Cluster1 never went under 4,479 h; rs-local — a 512 MB oplog —
+  fell to 55 s under load and spent 36.7 h under a day and 19 h under an hour. Warning under
+  24 h for an hour, critical under 1 h for 15 minutes; both fire on the two rs-local load
+  windows only, on all three members.
 
 ### 3. Swapping — not named
 
