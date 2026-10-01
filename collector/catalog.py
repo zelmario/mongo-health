@@ -56,6 +56,7 @@ AREA_OF = {
     "write-conflicts": "queries", "cursors-leaking": "queries", "ttl-storm": "queries",
     "connections-high": "connections", "connection-storm": "connections",
     "command-latency-high": "connections", "slow-wire-not-server": "connections",
+    "packets-retransmitted": "connections",
 }
 
 # The read and write halves of a pair share one comment in rules.ts; the second inherits it.

@@ -2,7 +2,7 @@
 
 Every check mongo-health runs, what it looks at, when it speaks and why at that threshold. Generated from the code by `collector/catalog.py`; the threshold rules come from `big-hole/src/insights/rules.ts`, reasoning included.
 
-37 threshold rules and 9 detectors.
+38 threshold rules and 9 detectors.
 
 ## Concurrency and queues
 
@@ -555,6 +555,22 @@ This is deliberately NOT called "the network". FTDC cannot see a network: what i
 Sixty was tried and dropped: on the same capture it changed nothing at all. The second, shorter netem injection (2m46s, and only about a minute of it above the line) stays unreported at either figure, so the lower threshold bought no detection and would only have widened the door. Not shipping it is the measurement's answer, not caution.
 
 **What to check.** The path between the clients and this server, before the database. Latency or packet loss on the link, a proxy or load balancer in front of it, TLS renegotiating on every connection, DNS resolution on each connect. The giveaway is that the application sees slow queries and every server-side number looks healthy -- which is exactly what this is reporting. Compare a client-side timing against the same operation run from a shell on the server itself.
+
+### The network is losing packets — `packets-retransmitted`
+
+**Severity:** warning · **Speaks when:** ≥ 5/s for 30 s, dips of up to 30 s tolerated; only while `pct(rate(systemMetrics.netstat.Tcp:RetransSegs), rate(systemMetrics.netstat.Tcp:OutSegs))` >= 0.5 too
+
+**Metric:** `rate(systemMetrics.netstat.Tcp:RetransSegs)`
+
+At least one in two hundred TCP segments this host sent had to be sent again: packets were being lost or badly delayed on the network.
+
+**Why this threshold.** The one network fact FTDC does carry: the kernel's count of TCP segments it had to send again. `slow-wire-not-server` infers a slow path from what stays still and deliberately names no cause; this one can, because a retransmission is the network saying so itself. It is a rule of its own rather than a condition on that one: a proxy, TLS or DNS make the wire slow without losing a packet, and requiring retransmissions would blind it to them.
+
+Measured on rs-local, netem on loopback (0.4-0.6% loss plus delay): the three injected windows -- 41 s on 9 Aug, 6 min and 2m46s on 14 Aug -- all at 5/s or more, and at 0.5% of segments or more, for 40 s, 356 s and 167 s. The 2m46s one is the injection the slow-wire rule cannot report at all.
+
+The rate alone is not enough. Retry storms on the same set reached 133/s for five minutes, but out of thousands of segments a second -- under 0.5% -- because a listen queue overflowing under a reconnect stampede retransmits SYNs, not data; the connection-storm rule already reports those. And a busy host sends tens of thousands of segments a second, where 5/s is nothing. Hence the share alongside. Cluster1 never held 5/s for more than 3 s in 20 days. Half a percent, not one: a moment where the companion fails cuts the episode outright -- tolerance does not bridge it -- and at 1% the first two minutes of the 6-minute injection came out in pieces too short to count. The retry storms stay under 0.5%. Thirty seconds, so the shortest injection (41 s) is read; tolerance for the gaps loss leaves between bursts.
+
+**What to check.** The network between this host and its clients or the other members: a saturated link, a failing NIC or cable, a congested switch port, packet loss at a firewall or across regions. If every member shows it at once, look at what they share. Queries will look slow from the application while the server itself is fast -- see slow-wire-not-server.
 
 ### Clients are reconnecting in a storm — `connection-storm`
 

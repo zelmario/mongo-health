@@ -27,7 +27,7 @@ are in [rules.md](rules.md).
 | Bad queries: scans, poor targeting, sorts on disk | `collection-scans-sustained`, `query-targeting-poor`, `sorts-spilling-*` |
 | Contention, leaked cursors, TTL storms | `write-conflicts`, `cursors-leaking`, `ttl-storm` |
 | Connections near the limit, reconnect storms | `connections-high`, `connection-storm` |
-| Slow commands, and telling a slow server from a slow network | `command-latency-high`, `slow-wire-not-server` |
+| Slow commands, and telling a slow server from a slow network | `command-latency-high`, `slow-wire-not-server`, `packets-retransmitted` |
 | Old snapshots pinning history | `history-store-pinned` |
 | A member stopped or stalling | `ftdc-long-outage`, `ftdc-micro-stalls` |
 | Failures that should never happen | alarm counters (checkpoint, index build, salvage, initial sync) |
@@ -106,8 +106,14 @@ network saying so itself.
 - **Data:** `systemMetrics.netstat.Tcp:RetransSegs` and `Tcp:OutSegs`.
 - **Measured:** rs-local reached 767 retransmits/s inside the injected network fault; Cluster1
   stays at 0–1/s with rare bursts to 20.
-- **Proposal:** add retransmissions as a second condition on `slow-wire-not-server` rather than a
-  rule of its own: it sharpens the one finding that blames the network.
+- **Done (packets-retransmitted)** — as a rule of its own after all, not a condition on
+  `slow-wire-not-server`: a proxy, TLS or DNS slow the wire without losing a packet, and
+  requiring retransmissions would have blinded that rule to them. ≥ 5/s for 30 s, only while
+  they are ≥ 0.5% of segments sent: retry storms reached 133/s on rs-local but under 0.5%
+  (SYNs into a full listen queue, out of thousands of segments a second). Over the full
+  histories it reports the three netem injections — including the 2m46s one slow-wire cannot
+  see — plus a series on 10 August that has no record but only netem produces on loopback, and
+  nothing on Cluster1.
 
 ### 6. Error bursts — user asserts
 

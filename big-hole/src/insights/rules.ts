@@ -867,6 +867,52 @@ export const RULES: readonly Rule[] = [
   },
 
   {
+    id: 'packets-retransmitted',
+    title: 'The network is losing packets',
+    severity: 'warning',
+    // The one network fact FTDC does carry: the kernel's count of TCP segments it had to send
+    // again. `slow-wire-not-server` infers a slow path from what stays still and deliberately
+    // names no cause; this one can, because a retransmission is the network saying so itself.
+    // It is a rule of its own rather than a condition on that one: a proxy, TLS or DNS make the
+    // wire slow without losing a packet, and requiring retransmissions would blind it to them.
+    //
+    // Measured on rs-local, netem on loopback (0.4-0.6% loss plus delay): the three injected
+    // windows -- 41 s on 9 Aug, 6 min and 2m46s on 14 Aug -- all at 5/s or more, and at 0.5%
+    // of segments or more, for 40 s, 356 s and 167 s. The 2m46s one is the injection the
+    // slow-wire rule cannot report at all.
+    //
+    // The rate alone is not enough. Retry storms on the same set reached 133/s for five
+    // minutes, but out of thousands of segments a second -- under 0.5% -- because a listen
+    // queue overflowing under a reconnect stampede retransmits SYNs, not data; the
+    // connection-storm rule already reports those. And a busy host sends tens of thousands of
+    // segments a second, where 5/s is nothing. Hence the share alongside. Cluster1 never held
+    // 5/s for more than 3 s in 20 days.
+    metric: 'rate(systemMetrics.netstat.Tcp:RetransSegs)',
+    op: '>=',
+    threshold: 5,
+    alongside: {
+      metric:
+        'pct(rate(systemMetrics.netstat.Tcp:RetransSegs), rate(systemMetrics.netstat.Tcp:OutSegs))',
+      op: '>=',
+      // Half a percent, not one: a moment where the companion fails cuts the episode outright
+      // -- tolerance does not bridge it -- and at 1% the first two minutes of the 6-minute
+      // injection came out in pieces too short to count. The retry storms stay under 0.5%.
+      threshold: 0.5,
+    },
+    // Thirty seconds, so the shortest injection (41 s) is read; tolerance for the gaps loss
+    // leaves between bursts.
+    sustainMs: 30_000,
+    toleranceMs: 30_000,
+    unit: 'per-sec',
+    what: 'At least one in two hundred TCP segments this host sent had to be sent again: packets were being lost or badly delayed on the network.',
+    check:
+      'The network between this host and its clients or the other members: a saturated link, a ' +
+      'failing NIC or cable, a congested switch port, packet loss at a firewall or across ' +
+      'regions. If every member shows it at once, look at what they share. Queries will look ' +
+      'slow from the application while the server itself is fast -- see slow-wire-not-server.',
+  },
+
+  {
     id: 'oplog-churn',
     title: 'Oplog growing far faster than the workload explains',
     severity: 'warning',

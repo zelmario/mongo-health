@@ -473,6 +473,26 @@
    "reasoning": "The mirror image of `command-latency-high`, on the same two metrics and with the opposite conjunction. Commands slow AND reads slow is a slow server. Commands slow AND reads FINE is not: the commands bucket counts awaitable and handshake traffic, so it absorbs the wait whenever something between the clients and the server is slow, while the work the server actually does stays exactly as fast as it was.\n Measured on a replica set with netem on loopback -- 120ms delay, 40ms jitter, 0.5% loss:\n us per command 200 -> 22,502 (and 13,515, 14,327, 10,958 through the window) us per read 840 -> 850 (unchanged) requests/s 2,000 -> 280 (the clients spend their time waiting) cache 87% -> 81%, read tickets free 5 -> 5, read queue 0, connections 90 -> 90\n Everything the server owns stayed still. That is the whole finding, and it is one no dashboard of database metrics will ever show, because every number on it is normal.\n This is deliberately NOT called \"the network\". FTDC cannot see a network: what it can say is that the server was not slow at the work it did, which is a fact, and that the time went somewhere it cannot see, which is also a fact. Naming the cause would be guessing, and this rule exists because guessing the cause is what sent people to the database in the first place. The same 5ms line as its sibling, and the same on both sides on purpose: the pair of rules partitions one situation rather than overlapping on it. Above the line for commands, below it for reads -- the server is not slow at its own work by exactly the definition the other rule uses to say that it is. Longer than its sibling's thirty seconds. A slow server is worth reporting quickly; this one is a claim about where the time is NOT going, and a brief handshake storm -- a deployment reconnecting every client at once -- produces the same shape for a few seconds without meaning anything.\n Sixty was tried and dropped: on the same capture it changed nothing at all. The second, shorter netem injection (2m46s, and only about a minute of it above the line) stays unreported at either figure, so the lower threshold bought no detection and would only have widened the door. Not shipping it is the measurement's answer, not caution."
   },
   {
+   "id": "packets-retransmitted",
+   "title": "The network is losing packets",
+   "severity": "warning",
+   "metric": "rate(systemMetrics.netstat.Tcp:RetransSegs)",
+   "op": ">=",
+   "threshold": 5,
+   "unit": "per-sec",
+   "sustainMs": 30000,
+   "toleranceMs": 30000,
+   "echoesAnEvent": false,
+   "alongside": {
+    "metric": "pct(rate(systemMetrics.netstat.Tcp:RetransSegs), rate(systemMetrics.netstat.Tcp:OutSegs))",
+    "op": ">=",
+    "threshold": 0.5
+   },
+   "what": "At least one in two hundred TCP segments this host sent had to be sent again: packets were being lost or badly delayed on the network.",
+   "check": "The network between this host and its clients or the other members: a saturated link, a failing NIC or cable, a congested switch port, packet loss at a firewall or across regions. If every member shows it at once, look at what they share. Queries will look slow from the application while the server itself is fast -- see slow-wire-not-server.",
+   "reasoning": "The one network fact FTDC does carry: the kernel's count of TCP segments it had to send again. `slow-wire-not-server` infers a slow path from what stays still and deliberately names no cause; this one can, because a retransmission is the network saying so itself. It is a rule of its own rather than a condition on that one: a proxy, TLS or DNS make the wire slow without losing a packet, and requiring retransmissions would blind it to them.\n Measured on rs-local, netem on loopback (0.4-0.6% loss plus delay): the three injected windows -- 41 s on 9 Aug, 6 min and 2m46s on 14 Aug -- all at 5/s or more, and at 0.5% of segments or more, for 40 s, 356 s and 167 s. The 2m46s one is the injection the slow-wire rule cannot report at all.\n The rate alone is not enough. Retry storms on the same set reached 133/s for five minutes, but out of thousands of segments a second -- under 0.5% -- because a listen queue overflowing under a reconnect stampede retransmits SYNs, not data; the connection-storm rule already reports those. And a busy host sends tens of thousands of segments a second, where 5/s is nothing. Hence the share alongside. Cluster1 never held 5/s for more than 3 s in 20 days. Half a percent, not one: a moment where the companion fails cuts the episode outright -- tolerance does not bridge it -- and at 1% the first two minutes of the 6-minute injection came out in pieces too short to count. The retry storms stay under 0.5%. Thirty seconds, so the shortest injection (41 s) is read; tolerance for the gaps loss leaves between bursts."
+  },
+  {
    "id": "oplog-churn",
    "title": "Oplog growing far faster than the workload explains",
    "severity": "warning",
