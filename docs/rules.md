@@ -2,7 +2,7 @@
 
 Every check mongo-health runs, what it looks at, when it speaks and why at that threshold. Generated from the code by `collector/catalog.py`; the threshold rules come from `big-hole/src/insights/rules.ts`, reasoning included.
 
-38 threshold rules and 9 detectors.
+38 threshold rules, 9 detectors and 13 configuration checks.
 
 ## Concurrency and queues
 
@@ -675,3 +675,109 @@ At the rate it has been growing, a resource reaches its limit soon — the only 
 Over at least a week, nothing went past half of what the cluster has — the one finding that saves money.
 
 **What to check.** That the period covers the busiest time of the month before resizing.
+
+## Configuration
+
+### MongoDB version past or near end of support — `version-end-of-life`
+
+**Severity:** warning · **Speaks when:** Past the end-of-life date MongoDB publishes for that major version (warning), or within 180 days of it (info).
+
+A version past its end of life gets no security fixes and no bug fixes, and the next upgrade has to cross every release in between.
+
+**What to check.** The recommendation on the cluster page names the members and the setting to change.
+
+### Members of the replica set run on the same host — `members-share-a-host`
+
+**Severity:** warning · **Speaks when:** Two or more members report the same host name, port aside.
+
+Members on one machine fail together. The point of three members is surviving the loss of one host; with a majority on one, losing it takes the primary away.
+
+**What to check.** The recommendation on the cluster page names the members and the setting to change.
+
+### Members with different memory or CPU — `unequal-members`
+
+**Severity:** warning · **Speaks when:** A member has less than three quarters of the memory or cores of the largest one.
+
+Any member can become primary. A smaller one holds a smaller cache and fewer cores, so a routine failover makes the whole cluster slower.
+
+**What to check.** The recommendation on the cluster page names the members and the setting to change.
+
+### Members running different MongoDB versions — `mixed-versions`
+
+**Severity:** warning · **Speaks when:** Members report different versions: a warning across major versions, info within one.
+
+Normal in the middle of a rolling upgrade and nowhere else: a member left behind behaves differently when it becomes primary.
+
+**What to check.** The recommendation on the cluster page names the members and the setting to change.
+
+### Transparent huge pages set the wrong way for the allocator — `transparent-huge-pages`
+
+**Severity:** warning · **Speaks when:** tcmalloc-google with THP not 'always' (warning), or defrag not 'defer+madvise' or max_ptes_none above 0 (info); any other allocator with THP 'always'. Silent where the server does not report THP.
+
+The right setting depends on the memory allocator mongod was built with. 8.0's tcmalloc-google uses per-CPU caches over huge pages and wants THP always; the older tcmalloc fragments under THP and wants it off. The advice reversed with 8.0, so many hosts carry the old one. These are the same checks mongod makes at startup and writes to a log almost nobody reads.
+
+**What to check.** The recommendation on the cluster page names the members and the setting to change.
+
+### glibc rseq left on under tcmalloc-google — `glibc-rseq`
+
+**Severity:** warning · **Speaks when:** tcmalloc-google, glibc with rseq support, and rseq not disabled for mongod.
+
+tcmalloc-google needs restartable sequences for itself; with glibc holding them, its per-CPU caches are off. mongod's own startup warning calls it critical.
+
+**What to check.** The recommendation on the cluster page names the members and the setting to change.
+
+### Open-file limit below MongoDB's minimum — `ulimits-low`
+
+**Severity:** warning · **Speaks when:** The soft limit on open files is below 64,000 — mongod's own startup check.
+
+Every connection and every data and index file takes a file descriptor. At the limit mongod refuses connections, and can abort mid-write.
+
+**What to check.** The recommendation on the cluster page names the members and the setting to change.
+
+### Strict memory overcommit — `overcommit-strict`
+
+**Severity:** info · **Speaks when:** vm.overcommit_memory is 2.
+
+With vm.overcommit_memory=2 the kernel refuses allocations mongod would have survived; mongod's startup warning asks for 1 (or the default, 0).
+
+**What to check.** The recommendation on the cluster page names the members and the setting to change.
+
+### WiredTiger cache too large for the host's memory — `cache-too-large`
+
+**Severity:** warning · **Speaks when:** The WiredTiger caches of the mongods on one host — set, or WiredTiger's default — add up to more than 60% of its memory.
+
+The cache is not all the memory mongod uses, and the filesystem cache under it is what keeps reads off the disk. Several mongods on one host each take half of memory by default.
+
+**What to check.** The recommendation on the cluster page names the members and the setting to change.
+
+### Reachable from the network without authorization — `open-without-auth`
+
+**Severity:** warning · **Speaks when:** bindIp includes an address other than localhost, and neither authorization nor a keyFile/x509 between members is on.
+
+Anyone who can reach the port can read, change or drop every database.
+
+**What to check.** The recommendation on the cluster page names the members and the setting to change.
+
+### Reachable from the network without TLS — `open-without-tls`
+
+**Severity:** info · **Speaks when:** bindIp includes an address other than localhost and net.tls.mode is not set.
+
+Credentials and data cross the network in clear text.
+
+**What to check.** The recommendation on the cluster page names the members and the setting to change.
+
+### Data on ext4 rather than XFS — `filesystem-not-xfs`
+
+**Severity:** info · **Speaks when:** The mount holding the dbPath is ext4. Silent where the mount cannot be resolved.
+
+MongoDB recommends XFS for WiredTiger: on ext4, checkpoints under write load are a known cause of stalls.
+
+**What to check.** The recommendation on the cluster page names the members and the setting to change.
+
+### Default write concern lowered to w:1 — `write-concern-w1`
+
+**Severity:** info · **Speaks when:** The cluster-wide default write concern was set to w:1 with setDefaultRWConcern.
+
+Since 5.0 the default is majority. With w:1 a write acknowledged by the primary is lost if the primary fails before a secondary copies it.
+
+**What to check.** The recommendation on the cluster page names the members and the setting to change.

@@ -147,10 +147,20 @@ queries.
 
 ## Configuration, not metrics — the recommendations step
 
-Everything here is in the FTDC metadata, so it needs no connection: a version past end of
-support, file and process ulimits below what MongoDB recommends, the cache set larger than
-memory allows, the default write concern, transparent huge pages. Planned as recommendations
-rather than findings: they are true all the time, not events.
+**Done (`collector/recommend.py`, 13 checks in [rules.md](rules.md#configuration)).** Read from
+the metadata at the top of every FTDC file, so no connection: version against MongoDB's
+published end-of-life dates, members sharing a host or sized unequally, mixed versions,
+transparent huge pages and glibc rseq judged by the allocator mongod was built with — the same
+checks mongod makes at startup (`startup_warnings_mongod.cpp`) — the open-files limit, strict
+overcommit, caches too large for the host, network exposure without authorization or TLS, ext4
+under the data, and a default write concern lowered to w:1. Shown on the cluster page, never
+mailed: a setting is not an event.
+
+Measured: rs-local gets one — all three members on one machine, which is true. Cluster1 gets
+none: Atlas sets THP, rseq, XFS, TLS, authorization and limits exactly as mongod asks.
+
+Not readable from FTDC, so not checked: vm.swappiness, readahead, NUMA interleaving (mongod
+reads `/proc/self/numa_maps`, which FTDC does not carry), the noop/none I/O scheduler.
 
 ## Not in FTDC at all
 

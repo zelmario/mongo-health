@@ -293,6 +293,16 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
 
     # --- summary: what the customer sees --------------------------------------------
     ftdc_bytes = sum(f.stat().st_size for f in ftdc.rglob("metrics.*") if f.is_file())
+    # A run whose files carried no metadata still knows how the member was configured: it is
+    # what the previous run read. Dropping it would make the recommendations come and go.
+    previous_config = {}
+    if (base / "summary.json").exists():
+        try:
+            previous_config = {n["node"]: n["config"] for n in
+                               json.loads((base / "summary.json").read_text()).get("nodes", [])
+                               if n.get("config")}
+        except (ValueError, KeyError):
+            previous_config = {}
     summary = {
         "cluster_id": cluster_id,
         "updated_at": stamp,
@@ -302,6 +312,7 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
                 "node": n["node"],
                 "hostname": n.get("hostname"),
                 "version": n.get("version"),
+                "config": n.get("config") or previous_config.get(n["node"]),
                 "samples": n["samples"],
                 "from": datetime.fromtimestamp(n["fromMs"] / 1000, timezone.utc).isoformat(),
                 "to": datetime.fromtimestamp(n["toMs"] / 1000, timezone.utc).isoformat(),

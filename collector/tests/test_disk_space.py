@@ -83,3 +83,12 @@ def test_a_full_data_disk_is_reported_on_its_own_mount(tmp_path):
 def test_a_full_root_disk_is_not_the_datas_problem(tmp_path):
     """The data lives on /data; a nearly full / is somebody else's alarm."""
     assert disk_findings(cluster(tmp_path, data_free=0.40, root_free=0.03)) == []
+
+
+def test_the_members_configuration_reaches_the_summary(tmp_path):
+    """The runner reads it from the metadata; recommend.py judges it from summary.json. The
+    path between them is what this checks -- Atlas once lost the whole of it to one field."""
+    base = cluster(tmp_path, data_free=0.40, root_free=0.60)
+    nodes = json.loads((base / "summary.json").read_text())["nodes"]
+    assert {n["config"]["dbPath"] for n in nodes} == {"/data/db"}
+    assert {n["config"]["hostname"] for n in nodes} == {"db1", "db2", "db3"}

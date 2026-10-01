@@ -34,6 +34,7 @@ AREAS = [
     ("connections", "Connections and network"),
     ("events", "Events"),
     ("history", "Against the cluster's own history"),
+    ("configuration", "Configuration"),
 ]
 
 AREA_OF = {
@@ -213,6 +214,14 @@ def entries() -> list[dict]:
     for d in DETECTORS:
         out.append({**d, "kind": "detector",
                     "items": data["events"].get(d.get("list", ""), [])})
+    # Settings, not events: read from the FTDC metadata by recommend.py.
+    import recommend
+    for c in recommend.CHECKS.values():
+        out.append({"id": c.id, "kind": "config", "area": "configuration",
+                    "severity": c.severity, "title": c.title, "what": c.why, "how": c.how,
+                    "check": "The recommendation on the cluster page names the members and "
+                             "the setting to change.",
+                    "source": "collector/recommend.py"})
     return out
 
 
@@ -227,8 +236,9 @@ def markdown() -> str:
              "Every check mongo-health runs, what it looks at, when it speaks and why at that "
              "threshold. Generated from the code by `collector/catalog.py`; the threshold rules "
              "come from `big-hole/src/insights/rules.ts`, reasoning included.", "",
-             f"{sum(1 for e in items if e['kind'] == 'threshold')} threshold rules and "
-             f"{sum(1 for e in items if e['kind'] == 'detector')} detectors.", ""]
+             f"{sum(1 for e in items if e['kind'] == 'threshold')} threshold rules, "
+             f"{sum(1 for e in items if e['kind'] == 'detector')} detectors and "
+             f"{sum(1 for e in items if e['kind'] == 'config')} configuration checks.", ""]
     for key, name in AREAS:
         group = [e for e in items if e["area"] == key]
         if not group:

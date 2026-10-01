@@ -34,6 +34,7 @@ from notify import changes_before
 from verdict import Verdict, evaluate
 import resolutions
 import catalog
+import recommend
 import sizing
 from profile import times_before
 from watchdog import STALE_AFTER_HOURS
@@ -923,6 +924,15 @@ table.capacity td.num, table.capacity .num { font-family: var(--mono); white-spa
 .capacity-line[data-state="spare"] { color: var(--ok); }
 ul.forecasts { margin: 0 0 1rem; padding-left: 1.1rem; }
 ul.forecasts a { color: var(--warn); }
+/* Configuration: true all the time, so not on the timeline. A list to work through. */
+ol.config { list-style: none; margin: 0 0 1rem; padding: 0; display: grid; gap: .6rem; }
+ol.config > li { background: var(--panel); border: 1px solid var(--edge);
+                 border-left: 3px solid var(--sev-colour, var(--ink-faint)); padding: .9rem 1.1rem; }
+ol.config > li[data-sev="warning"] { --sev-colour: var(--warn); }
+ol.config b { display: block; margin-bottom: .2rem; }
+ol.config p { margin: .25rem 0 0; color: var(--ink-soft); font-size: .9rem; }
+ol.config p.fix { color: var(--ink); }
+ol.config .who { font-family: var(--mono); font-size: .8rem; color: var(--ink-faint); }
 
 /* The verdict: the answer before the evidence. The colour is the state; the rail makes it
    readable in a glance down a list, and the text says it again for anyone who cannot rely on
@@ -1340,6 +1350,29 @@ def capacity_section(cap: dict) -> str:
        member worked hardest.</p>"""
 
 
+def config_section(recs: list, configured: bool) -> str:
+    """How the cluster is set up against what MongoDB asks for. See recommend.py."""
+    if not configured:
+        return ""
+    if not recs:
+        return ("<h2>Configuration</h2>"
+                '<div class="quiet"><b>Nothing to change</b><p>Version, kernel settings, '
+                "limits, memory, topology and security all read the way MongoDB recommends, "
+                "as far as the FTDC metadata shows them.</p></div>")
+    items = "".join(f"""
+      <li data-sev="{esc(r.severity)}">
+        <b>{esc(r.title)}</b>
+        <p>{esc(r.what)} {esc(r.why)}</p>
+        <p class="fix">{esc(r.fix)}</p>
+        <p class="who">{esc(", ".join(m.split(".")[0] for m in r.members))}</p>
+      </li>""" for r in recs)
+    return f"""
+    <h2>Configuration</h2>
+    <p class="lede">Read from the metadata at the top of every FTDC file — the same things mongod
+       checks at startup and writes to a log almost nobody reads.</p>
+    <ol class="config">{items}</ol>"""
+
+
 def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, older: int,
                  findings: list[dict], chart_file, profile_html: str | None,
                  muted: set[str], now: datetime, verdict: Verdict,
@@ -1408,6 +1441,8 @@ def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, olde
     {found}
     {older_link}
     {muted_note}
+    {config_section(recommend.evaluate(summary.get("nodes", []), now.date()),
+                    any(n.get("config") for n in summary.get("nodes", [])))}
     {capacity_section(cap) if cap else ''}
     {profile}"""
     return layout(f"{cluster_id} · mongo-health", body, "../", now)
@@ -1625,10 +1660,12 @@ def page_rules(now: datetime) -> str:
         </article>""")
         sections.append(f"<h2>{esc(name)}</h2>{''.join(cards)}")
     thresholds = sum(1 for e in items if e["kind"] == "threshold")
+    configs = sum(1 for e in items if e["kind"] == "config")
     body = f"""
     <p><a href="index.html" class="back">← all clusters</a></p>
     <h1>The checks</h1>
-    <p class="lede">{thresholds} threshold rules and {len(items) - thresholds} detectors. Every
+    <p class="lede">{thresholds} threshold rules, {len(items) - thresholds - configs} detectors
+       and {configs} configuration checks. Every
        number is either a documented MongoDB or WiredTiger limit or a value measured on a real
        capture — the reasoning is under each one.</p>
     {''.join(sections)}"""

@@ -179,6 +179,93 @@ const TRACKED: Array<{ name: string; expr: string }> = [
  * raise a disk alarm on every healthy host. Without a dbPath in the metadata it falls back to
  * MongoDB's default, /data/db -- which on most hosts resolves to the root mount.
  */
+/**
+ * The part of a member's configuration the recommendations judge, read from the metadata
+ * mongod writes at the top of every FTDC file. Nothing here needs a connection.
+ *
+ * Every field is optional: older servers do not report THP, an operating system without
+ * /proc/mounts reports no filesystem, and a check whose input is absent must stay silent
+ * rather than guess.
+ */
+interface NodeConfig {
+  version?: string;
+  hostname?: string;
+  replSet?: string;
+  memMB?: number;
+  cores?: number;
+  cacheSizeGB?: number;
+  fdSoft?: number;
+  allocator?: string;
+  thpEnabled?: string;
+  thpDefrag?: string;
+  thpMaxPtesNone?: number;
+  overcommit?: number;
+  rseqPresent?: boolean;
+  rseqDisabled?: boolean;
+  auth?: string;
+  /** A keyFile or x509 between members turns authorization on by itself. */
+  internalAuth?: boolean;
+  bindIp?: string;
+  bindIpAll?: boolean;
+  tlsMode?: string;
+  writeConcernW?: string | number;
+  writeConcernSource?: string;
+  dbPath?: string;
+  dataFs?: string;
+  dataMountPoint?: string;
+}
+
+function configOf(doc: any): NodeConfig {
+  const parsed = doc?.getCmdLineOpts?.parsed ?? {};
+  const sys = doc?.hostInfo?.system ?? {};
+  const extra = doc?.hostInfo?.extra ?? {};
+  const dbPath: string = parsed.storage?.dbPath ?? '/data/db';
+  // The filesystem under the data, by the same longest-prefix rule `dataMount` uses for the
+  // metrics. On WSL the root mount is not listed at all, and then there is no answer.
+  let mount: { mountPoint: string; type: string } | undefined;
+  for (const m of (extra.mountInfo ?? []) as Array<{ mountPoint?: string; type: string }>) {
+    // Atlas lists entries with no mount point at all; one of them used to throw here and
+    // take the whole configuration with it.
+    const p = m.mountPoint;
+    if (typeof p !== 'string') continue;
+    const covers = p === '/' || dbPath === p || dbPath.startsWith(p.endsWith('/') ? p : `${p}/`);
+    if (covers && (mount === undefined || p.length > mount.mountPoint.length)) {
+      mount = { mountPoint: p, type: m.type };
+    }
+  }
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : undefined);
+  const out: NodeConfig = {
+    version: doc?.buildInfo?.version,
+    hostname: sys.hostname,
+    replSet: parsed.replication?.replSetName ?? parsed.replication?.replSet,
+    memMB: num(sys.memLimitMB) ?? num(sys.memSizeMB),
+    cores: num(sys.numCoresAvailableToProcess) ?? num(sys.numCores),
+    cacheSizeGB: num(parsed.storage?.wiredTiger?.engineConfig?.cacheSizeGB),
+    fdSoft: num(doc?.ulimits?.fileDescriptors?.soft),
+    allocator: doc?.buildInfo?.allocator,
+    thpEnabled: extra.thp_enabled,
+    thpDefrag: extra.thp_defrag,
+    // The kernel's files hold text; mongod passes them on as strings.
+    thpMaxPtesNone: extra.thp_max_ptes_none !== undefined ? Number(extra.thp_max_ptes_none) : undefined,
+    overcommit: extra.overcommit_memory !== undefined ? Number(extra.overcommit_memory) : undefined,
+    rseqPresent: typeof extra.glibc_rseq_present === 'boolean' ? extra.glibc_rseq_present : undefined,
+    rseqDisabled: typeof extra.glibc_pthread_rseq_disabled === 'boolean'
+      ? extra.glibc_pthread_rseq_disabled : undefined,
+    auth: parsed.security?.authorization,
+    internalAuth: parsed.security?.keyFile || parsed.security?.clusterAuthMode === 'x509'
+      ? true : undefined,
+    bindIp: parsed.net?.bindIp,
+    bindIpAll: parsed.net?.bindIpAll === true ? true : undefined,
+    tlsMode: parsed.net?.tls?.mode ?? parsed.net?.ssl?.mode,
+    writeConcernW: doc?.getDefaultRWConcern?.defaultWriteConcern?.w,
+    writeConcernSource: doc?.getDefaultRWConcern?.defaultWriteConcernSource,
+    dbPath,
+    dataFs: mount?.type,
+    dataMountPoint: mount?.mountPoint,
+  };
+  return Object.fromEntries(Object.entries(out).filter(([, v]) => v !== undefined)) as NodeConfig;
+}
+
 function dataMount(paths: ReadonlySet<string>, dbPath: string | undefined): string | undefined {
   const target = dbPath ?? '/data/db';
   let best: string | undefined;
@@ -444,6 +531,8 @@ interface NodeSummary {
   node: string;
   hostname?: string;
   version?: string;
+  /** How this member is configured, from the newest metadata this run read. See `configOf`. */
+  config?: NodeConfig;
   fromMs: number;
   toMs: number;
   samples: number;
@@ -751,9 +840,26 @@ try {
     let hostname: string | undefined;
     let mongoVersion: string | undefined;
     let dbPath: string | undefined;
+    let config: NodeConfig | undefined;
 
     for (const file of files) {
       const bytes = new Uint8Array(readFileSync(file));
+      // The configuration from the NEWEST file, unlike the name: after a resize the oldest
+      // metadata describes a server that no longer exists.
+      let meta: ReturnType<typeof readMetadata> | undefined;
+      try {
+        meta = readMetadata(bytes);
+      } catch {
+        /* no metadata in this file */
+      }
+      if (meta?.doc) {
+        try {
+          config = configOf(meta.doc);
+        } catch (e) {
+          // Said out loud: swallowed, it looked exactly like a server that reports nothing.
+          console.error(`  note: ${node}: configuration unreadable: ${(e as Error).message}`);
+        }
+      }
       if (hostname === undefined) {
         try {
           const meta = readMetadata(bytes);
@@ -1079,6 +1185,7 @@ try {
       node,
       hostname,
       version: mongoVersion,
+      ...(config !== undefined ? { config } : {}),
       ...extent,
       cadenceMs: manifest.cadenceMs,
       changes,
