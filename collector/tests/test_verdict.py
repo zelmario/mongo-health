@@ -74,6 +74,55 @@ def test_a_cluster_never_captured_is_not_called_healthy():
     assert verdict([], captured=False).state == "unwatched"
 
 
+def test_files_not_yet_analysed_are_not_called_healthy():
+    """An upload is captured minutes before its first analysis ends, with no findings yet."""
+    v = evaluate([], NOW, None, True, 0.0, analysed=False)
+    assert v.state == "pending"
+    assert v.label == "Not checked yet"
+
+
 def test_the_moment_that_decided_it_is_kept_for_the_link():
     v = verdict([f("a", "critical", ended_hours_ago=1)])
     assert v.evidence[0].groups[0].worst["id"] == "a"
+
+
+def test_uploaded_files_are_judged_as_of_their_last_sample():
+    """A day-old upload with a critical in its last hour: problems in the files, never "at risk"."""
+    ends = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
+    end_ms = int(ends.timestamp() * 1000)
+    critical = dict(f("a", "critical"), toMs=end_ms - HOUR // 2, worstToMs=end_ms - HOUR // 2)
+    v = evaluate([critical], NOW, None, True, 4.5, ends=ends)
+    assert v.state == "files_problems"
+    assert "in the last hour of the FTDC" in v.reason
+    assert "19 Aug 2026 12:00 UTC" in v.reason
+
+
+def test_uploaded_files_with_nothing_serious_say_so_about_the_files():
+    ends = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    v = evaluate([], NOW, None, True, 4.5, ends=ends)
+    assert v.state == "files_clean"
+    assert "last 7 days of the FTDC" in v.reason
+
+
+def test_an_analysis_running_says_so_rather_than_not_watched():
+    v = evaluate([], NOW, 30.0, True, 4.5, analyzing={"files": 26})
+    assert v.state == "analyzing"
+    assert v.label == "Analyzing FTDC"
+    assert "26 new files" in v.reason
+
+
+def test_a_cluster_whose_samples_are_arriving_is_waiting_not_unwatched():
+    v = evaluate([], NOW, None, False, 0.0, arriving={"members": 3})
+    assert v.state == "waiting" and "3 members" in v.reason
+
+
+def test_a_poller_error_is_said_as_it_was_said():
+    v = evaluate([], NOW, None, False, 0.0, arriving={"error": "Authentication failed."})
+    assert v.state == "unwatched" and "Authentication failed." in v.reason
+
+
+def test_a_failed_first_analysis_says_so_instead_of_promising_one():
+    v = evaluate([], NOW, None, True, 0.0, analysed=False,
+                 failed={"error": "RuntimeError: engine failed (1)"})
+    assert v.state == "failed" and "engine failed" in v.reason
+    assert "updates when" not in v.reason

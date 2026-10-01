@@ -177,8 +177,10 @@ class Writer:
     grows past int32) the chunk is closed and a new one starts, which is what mongod does too.
     """
 
-    def __init__(self, directory: Path, metadata, clock=lambda: datetime.now(timezone.utc)):
+    def __init__(self, directory: Path, metadata, clock=lambda: datetime.now(timezone.utc),
+                 chunk_samples: int = CHUNK_SAMPLES):
         self.directory = Path(directory)
+        self.chunk_samples = chunk_samples
         self.metadata = metadata      # called at every new file: buildInfo, hostInfo...
         self.clock = clock
         self.path: Path | None = None
@@ -196,7 +198,7 @@ class Writer:
         if self.schema is None:
             self.reference, self.schema, self.started = raw, schema, self.clock()
         self.samples.append([v for _, _, v in flat])
-        if len(self.samples) >= CHUNK_SAMPLES:
+        if len(self.samples) >= self.chunk_samples:
             self.flush()
 
     def flush(self) -> None:

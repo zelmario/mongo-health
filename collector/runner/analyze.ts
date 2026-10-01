@@ -66,6 +66,10 @@ const untilMs = argv.includes('--until') ? Date.parse(argv[argv.indexOf('--until
 // of it would overwrite days a production run had summarised with more data.
 const dailyDir = argv.includes('--daily') && untilMs === 0
   ? argv[argv.indexOf('--daily') + 1]! : undefined;
+// Where to write how far the decode has got, for the page's progress bar. Separate from stdout,
+// which is the result and nothing else.
+const progressPath = argv.includes('--progress')
+  ? argv[argv.indexOf('--progress') + 1]! : undefined;
 
 /* --------------------------------------------------------------------- metrics ---- */
 
@@ -823,14 +827,30 @@ const store = new NodeFileStore(tmpDir);
 const readers = new Map<string, CaptureReader>();
 const captures: DetectCapture[] = [];
 
+// Every file this run decodes, worked out first so the progress has a denominator. Never empty
+// for a node with files: the newest file is always read, even when every sample in it is older
+// than `decodeFrom`. That is a node that stopped, and it still has a history.
+const plan = nodes.map((node) => {
+  const held = metricsFilesIn(join(root, node));
+  return { held, files: held.length === 0 ? [] : filesFrom(held, decodeFrom) };
+});
+const totalFiles = plan.reduce((n, p) => n + p.files.length, 0);
+let doneFiles = 0;
+function progress(node: string | null, stage: 'decoding' | 'summarising' | 'checks'): void {
+  if (progressPath === undefined) return;
+  try {
+    writeJson(progressPath, { done: doneFiles, total: totalFiles, node, stage });
+  } catch {
+    // A progress bar that cannot be drawn is no reason to fail the analysis.
+  }
+}
+
 try {
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i]!;
-    const held = metricsFilesIn(join(root, node));
+    const { held, files } = plan[i]!;
     if (held.length === 0) continue;
-    // Never empty when `held` is not: the newest file is always read, even when every sample in
-    // it is older than `decodeFrom`. That is a node that stopped, and it still has a history.
-    const files = filesFrom(held, decodeFrom);
+    progress(node, 'decoding');
     const nodeDaily = dailyDir !== undefined ? join(dailyDir, node) : undefined;
     // What every whole-history read below is limited to. Everything, without `--daily`.
     const scope = (decodeFrom > 0 ? { from: decodeFrom } : {}) as SeriesQuery;
@@ -877,7 +897,10 @@ try {
         // It must not sink the rest of the node.
         console.error(`  note: ${node}/${file.split('/').pop()}: ${(e as Error).message}`);
       }
+      doneFiles++;
+      progress(node, 'decoding');
     }
+    progress(node, 'summarising');
 
     // The label every finding id is built from. If the files this run read carried no metadata,
     // the name has to come from the stored days: falling back to the directory name would
@@ -1205,6 +1228,8 @@ try {
         `${((manifest.endMs - manifest.startMs) / 3.6e6).toFixed(1)} h · ${mongoVersion ?? '?'}`,
     );
   }
+
+  progress(null, 'checks');
 
   // Last, so a run that dies half way leaves no marker and the next one rebuilds.
   if (dailyDir !== undefined) {

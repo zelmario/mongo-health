@@ -30,6 +30,14 @@ ATTENTION_DAYS = 7
 
 LABELS = {
     "unwatched": "Not being watched",
+    "pending": "Not checked yet",
+    "analyzing": "Analyzing FTDC",
+    "waiting": "Waiting for the first data",
+    "failed": "Analysis failed",
+    # Uploaded files and nothing more. Never "At risk" or "Healthy": those describe a cluster
+    # as it is now, and these describe a capture that ended.
+    "files_problems": "Problems found in the FTDC",
+    "files_clean": "Nothing found in the FTDC",
     "at_risk": "At risk",
     "attention": "Needs attention",
     "healthy": "Healthy",
@@ -47,37 +55,78 @@ class Verdict:
         return LABELS[self.state]
 
 
-def _ago(ms: int, now_ms: int) -> str:
+def _ago(ms: int, now_ms: int, archive: bool = False) -> str:
     hours = (now_ms - ms) / HOUR_MS
     if hours < 1:
-        return "in the last hour"
+        return "in the last hour of the FTDC" if archive else "in the last hour"
     if hours < 48:
         n = int(hours)
-        return f"{n} hour{'s' if n != 1 else ''} ago"
-    n = int(hours // 24)
-    return f"{n} days ago"
+        span = f"{n} hour{'s' if n != 1 else ''}"
+    else:
+        span = f"{int(hours // 24)} days"
+    return f"{span} before the FTDC ends" if archive else f"{span} ago"
 
 
-def _describe(found: list, now_ms: int, window: str) -> str:
+def _describe(found: list, now_ms: int, window: str, archive: bool = False) -> str:
     """The worst moment by name, and how many more there are."""
     worst = found[0]
-    line = f"{worst.headline()}, {_ago(worst.to_ms, now_ms)}"
+    line = f"{worst.headline()}, {_ago(worst.to_ms, now_ms, archive)}"
     rest = len(found) - 1
     if rest:
-        line += f" — and {rest} more incident{'s' if rest != 1 else ''} in the last {window}"
+        tail = f"in its last {window}" if archive else f"in the last {window}"
+        line += f" — and {rest} more incident{'s' if rest != 1 else ''} {tail}"
     return line + "."
 
 
 def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
-             captured: bool, days_held: float) -> Verdict:
+             captured: bool, days_held: float, analysed: bool = True,
+             ends: datetime | None = None, analyzing: dict | None = None,
+             arriving: dict | None = None, failed: dict | None = None) -> Verdict:
     """The verdict for one cluster.
 
     `silent_hours` is how long data has not been arriving, when that is past what is allowed
-    (see report.silent_hours); `days_held` is how much history the checks ran over.
+    (see report.silent_hours); `days_held` is how much history the checks ran over; `analysed`
+    is whether any analysis has run over what was captured.
+
+    `ends` is set for a cluster that is only files somebody handed over, with nothing sending
+    more: the newest sample in them. Nobody promised data after it, so its age is not silence,
+    and the files are judged as of that moment. Judged against the clock instead, a capture
+    with 31 incidents in it read "Not being watched" a day after it was taken.
+
+    `analyzing` is set while an analysis is running over new files: what it is reading.
+
+    `arriving` is what the poller says about a cluster with nothing captured yet: the members it
+    is reading, or the error that stops it. A cluster added a minute ago read "Not being
+    watched" until its first capture, while its samples were already coming in.
     """
     if not captured:
+        if arriving and arriving.get("error"):
+            return Verdict("unwatched", f"The collector cannot read this cluster: "
+                                        f"{arriving['error']}")
+        if arriving and arriving.get("members"):
+            n = arriving["members"]
+            return Verdict("waiting", f"Samples are arriving from {n} member"
+                                      f"{'s' if n != 1 else ''}. The first capture and "
+                                      f"analysis run within a few minutes.")
         return Verdict("unwatched", "Nothing has been captured from this cluster yet.")
-    if silent_hours is not None:
+    if analyzing:
+        n = analyzing.get("files") or 0
+        what = f"{n} new file{'s' if n != 1 else ''}" if n else "the new files"
+        return Verdict("analyzing", f"Reading {what}. This page updates when the analysis "
+                                    f"finishes.")
+    # Files and no analysis has no findings either, and read as "Healthy" for the minutes a
+    # first analysis takes: a clean bill of health from checks that had not run.
+    if not analysed and failed:
+        return Verdict("failed", f"The analysis of the files received failed, so no check has "
+                                 f"run over them: {failed.get('error')}. It is tried again "
+                                 f"on the next round.")
+    if not analysed:
+        return Verdict("pending", "Files have arrived, but no check has run over them yet. "
+                                  "This page updates when the analysis finishes.")
+    archive = ends is not None
+    if archive:
+        now = ends
+    elif silent_hours is not None:
         span = (f"{silent_hours / 24:.0f} days" if silent_hours >= 48
                 else f"{silent_hours:.0f} hours")
         return Verdict("unwatched",
@@ -96,6 +145,19 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
 
     critical_today = sorted((m for m in recent if m.severity == "critical"
                              and m.to_ms >= now_ms - AT_RISK_HOURS * HOUR_MS), key=order)
+    # Said once, after the finding: which moment "the last day" means, and what keeps it going.
+    upto = (f" Judged on the FTDC provided, which ends {ends:%d %b %Y %H:%M} UTC. To keep it "
+            f"current, add the cluster over SFTP or from a folder." if archive else "")
+    if archive:
+        if recent:
+            ranked = sorted(recent, key=order)
+            return Verdict("files_problems", _describe(ranked, now_ms, "week", archive) + upto,
+                           ranked)
+        held = f"{days_held:.0f} days" if days_held >= 2 else f"{days_held * 24:.0f} hours"
+        return Verdict("files_clean", f"Nothing critical or worth a look in the last "
+                                      f"{ATTENTION_DAYS} days of the FTDC. Every check ran over "
+                                      f"{held} of history.{upto}")
+
     if critical_today:
         return Verdict("at_risk", _describe(critical_today, now_ms, "day"), critical_today)
 

@@ -5,12 +5,11 @@ decodes exactly like one from Atlas. Only the transport differs, so the transpor
 thing abstracted here -- the rest of the pipeline always receives the same thing: new
 `metrics.*` files for a (customer_id, cluster_id).
 
-Today there is one real implementation (Atlas). The others are declared because knowing they
-will exist shapes the interface, not because they need writing yet.
+Atlas, a directory on this machine, and SFTP to each member are the ways files are pulled;
+the poller and the upload form put theirs in a directory the collector then reads.
 """
 from __future__ import annotations
 
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -387,34 +386,60 @@ class DirectorySource:
 
 
 class SSHSource:
-    """A `diagnostic.data` on a remote machine, pulled over scp.
+    """Each member's `diagnostic.data`, read over SFTP as a user that can do nothing else.
 
-    Meant for the self-managed customer who does not want to install anything: a read-only
-    key over the diagnostic directory is enough.
+    The same files mongod writes every second, so the same resolution as Atlas, and the same
+    shape of run: once a round, only what is new. The add page creates the user, the key and
+    the read grant, and learns each host's key while somebody is looking at it.
+
+    Only files from `since` on are downloaded, plus `metrics.interim`. `since` is the oldest
+    file that may still be growing (State.oldest_open_file), the same anchor Atlas's date
+    filter uses; the first run, with none, takes the whole directory. The first version copied
+    every file on every run -- up to 200 MB a member an hour, of which almost all was held.
+
+    One member failing does not stop the others: they are read, and the failure is raised at
+    the end, so the run reports it and the members that answered are still captured.
     """
 
-    def __init__(self, host: str, remote_path: str, user: str | None = None,
-                 identity: str | None = None) -> None:
-        self.host = host
+    def __init__(self, hosts: list[str], remote_path: str, user: str, identity: str,
+                 known_hosts: str) -> None:
+        self.hosts = hosts
         self.remote_path = remote_path.rstrip("/")
         self.user = user
-        self.identity = identity
+        self.identity = Path(identity)
+        self.known_hosts = Path(known_hosts)
 
     def describe(self) -> str:
-        target = f"{self.user}@{self.host}" if self.user else self.host
-        return f"ssh:{target}:{self.remote_path}"
+        return f"ssh:{self.user}@{','.join(self.hosts)}:{self.remote_path}"
 
     def fetch(self, since: datetime | None) -> Iterator[FTDCFile]:
-        tmp = Path(tempfile.mkdtemp(prefix="ftdc-ssh-"))
-        target = f"{self.user}@{self.host}" if self.user else self.host
-        cmd = ["scp", "-r", "-q"]
-        if self.identity:
-            cmd += ["-i", self.identity]
-        cmd += [f"{target}:{self.remote_path}/metrics.*", str(tmp)]
-        subprocess.run(cmd, check=True, timeout=600)
+        import sftp
+        from state import timestamp_of
 
-        for path in sorted(tmp.glob("metrics.*")):
-            yield FTDCFile(node=self.host, name=path.name, path=path)
+        failures = []
+        tmp = Path(tempfile.mkdtemp(prefix="ftdc-ssh-"))
+        for entry in self.hosts:
+            host, port = sftp.split_host(entry)
+            try:
+                session = sftp.connect(host, port, self.user, self.identity, self.known_hosts)
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"{entry}: {sftp.explain(e, self.user, self.remote_path)}")
+                continue
+            try:
+                for a in sftp.metrics_in(session, self.remote_path):
+                    stamp = timestamp_of(a.filename)
+                    if since is not None and stamp is not None and stamp < since:
+                        continue
+                    local = tmp / sftp.member_name(entry) / a.filename
+                    local.parent.mkdir(parents=True, exist_ok=True)
+                    sftp.download(session, f"{self.remote_path}/{a.filename}", local)
+                    yield FTDCFile(node=sftp.member_name(entry), name=a.filename, path=local)
+            except Exception as e:  # noqa: BLE001
+                failures.append(f"{entry}: {sftp.explain(e, self.user, self.remote_path)}")
+            finally:
+                session.close()
+        if failures:
+            raise RuntimeError("; ".join(failures))
 
 
 def build(spec: dict, pending_job: str | None = None, job_estimate: float | None = None,
@@ -441,5 +466,7 @@ def build(spec: dict, pending_job: str | None = None, job_estimate: float | None
     if kind == "directory":
         return DirectorySource(Path(spec["path"]), spec.get("node"))
     if kind == "ssh":
-        return SSHSource(spec["host"], spec["path"], spec.get("user"), spec.get("identity"))
+        return SSHSource(spec.get("hosts") or [spec["host"]], spec["path"],
+                         spec.get("user") or "mongo-health-ftdc", spec["identity"],
+                         spec["known_hosts"])
     raise ValueError(f"unknown source type: {kind}")

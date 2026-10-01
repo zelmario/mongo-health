@@ -365,3 +365,15 @@ def test_a_normal_reply_says_nothing(monkeypatch, capsys):
     AtlasSource("g", "rs", "pub", "priv")._create_job(None)
 
     assert capsys.readouterr().err == ""
+
+
+def test_uploaded_files_alone_are_not_on_the_watchdog_roster(tmp_path: Path):
+    """Nothing sends more after an upload, so its age must never read as a stopped capture."""
+    import capture
+    capture.write_roster(tmp_path, [
+        {"cluster_id": "uploaded", "source": {"type": "onprem"}},
+        {"cluster_id": "connected", "source": {"type": "onprem", "uri": "mongodb://h/"}},
+        {"cluster_id": "atlas", "source": {"type": "atlas"}},
+    ])
+    listed = {c["cluster_id"] for c in json.loads((tmp_path / "roster.json").read_text())["clusters"]}
+    assert listed == {"connected", "atlas"}

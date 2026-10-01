@@ -15,3 +15,4 @@ big-hole/tools/analyze.ts
 # Docker
 .env
 config/config.json
+config/keys/

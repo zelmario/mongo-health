@@ -11,7 +11,6 @@ out as `host/27017/diagnostic.data`; these keep the parts of that which can run 
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -69,55 +68,104 @@ def test_a_replica_set_is_one_directory_per_member(tmp_path):
 
 # ------------------------------------------------------------------------- the ssh path
 
-def test_ssh_pulls_with_the_identity_and_yields_what_arrived(tmp_path, monkeypatch):
-    """`fetch` had never been executed by a test — only its description.
-
-    Nothing here talks to a real host: the point is the command that would be run, and that
-    whatever lands in the temporary directory is handed on with the host as the node name.
-    """
-    seen: dict = {}
-
-    def fake_run(cmd, **kwargs):
-        seen["cmd"] = cmd
-        seen["kwargs"] = kwargs
-        # scp would drop the files into the last argument.
-        landing = Path(cmd[-1])
-        (landing / "metrics.2026-08-05T12-00-00Z-00000").write_bytes(b"x")
-        (landing / "metrics.interim").write_bytes(b"y")
-        (landing / "something-else.log").write_bytes(b"z")
-        return subprocess.CompletedProcess(cmd, 0)
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
-
-    source = SSHSource("db1.acme.internal", "/var/lib/mongo/diagnostic.data/",
-                       user="readonly", identity="/keys/acme")
-    files = list(source.fetch(datetime(2026, 8, 1, tzinfo=timezone.utc)))
-
-    assert seen["cmd"][0] == "scp"
-    assert "-i" in seen["cmd"] and "/keys/acme" in seen["cmd"]
-    assert "readonly@db1.acme.internal:/var/lib/mongo/diagnostic.data/metrics.*" in seen["cmd"]
-    assert seen["kwargs"].get("check") is True, "a failed copy must not look like an empty one"
-
-    assert {f.name for f in files} == {"metrics.2026-08-05T12-00-00Z-00000", "metrics.interim"}
-    assert {f.node for f in files} == {"db1.acme.internal"}
+class FakeAttr:
+    def __init__(self, name, size):
+        self.filename, self.st_size = name, size
 
 
-def test_ssh_without_a_user_still_builds_a_target(monkeypatch):
-    """Plenty of setups carry the user in ~/.ssh/config instead."""
-    seen: dict = {}
-    monkeypatch.setattr(subprocess, "run",
-                        lambda cmd, **kw: seen.setdefault("cmd", cmd) and None
-                        or subprocess.CompletedProcess(cmd, 0))
-    list(SSHSource("db1.acme.internal", "/data/diagnostic.data").fetch(None))
-    assert "db1.acme.internal:/data/diagnostic.data/metrics.*" in seen["cmd"]
-    assert "-i" not in seen["cmd"]
+class FakeSession:
+    """What sftp.connect returns, over a dict of remote files."""
+
+    def __init__(self, files):
+        self.files, self.closed, self.got = files, False, []
+        self.sftp = self
+
+    def listdir_attr(self, path):
+        return [FakeAttr(n, len(b)) for n, b in self.files.items()]
+
+    def getfo(self, remote, buf):
+        self.got.append(remote.rsplit("/", 1)[-1])
+        buf.write(self.files[remote.rsplit("/", 1)[-1]])
+
+    def close(self):
+        self.closed = True
 
 
-def test_a_failing_copy_raises_rather_than_reporting_nothing(monkeypatch):
+REMOTE = {
+    "metrics.2026-08-01T00-00-00Z-00000": b"old",
+    "metrics.2026-08-05T12-00-00Z-00000": b"open",
+    "metrics.interim": b"tail",
+    "something-else.log": b"z",
+}
+
+
+def ssh(hosts=("db1", "db2")):
+    return SSHSource(list(hosts), "/var/lib/mongo/diagnostic.data/", "mongo-health-ftdc",
+                     "/keys/acme", "/keys/known_hosts")
+
+
+def test_ssh_downloads_only_what_may_have_changed(monkeypatch):
+    """From the oldest file that may still grow, plus the interim file -- not the directory."""
+    import sftp
+    sessions = {}
+    monkeypatch.setattr(sftp, "connect", lambda host, port, user, key, known, learn=False:
+                        sessions.setdefault(host, FakeSession(REMOTE)))
+    files = list(ssh().fetch(datetime(2026, 8, 5, 12, tzinfo=timezone.utc)))
+    assert {(f.node, f.name) for f in files} == {
+        (h, n) for h in ("db1", "db2")
+        for n in ("metrics.2026-08-05T12-00-00Z-00000", "metrics.interim")}
+    assert all(s.closed for s in sessions.values())
+
+
+def test_ssh_takes_everything_on_the_first_run(monkeypatch):
+    import sftp
+    monkeypatch.setattr(sftp, "connect", lambda *a, **k: FakeSession(REMOTE))
+    names = {f.name for f in ssh(["db1"]).fetch(None)}
+    assert names == {n for n in REMOTE if n.startswith("metrics.")}
+
+
+def test_one_member_down_still_reads_the_others_then_fails_the_run(monkeypatch):
     """Silence is how a broken collector looks exactly like a healthy cluster."""
-    def boom(cmd, **kwargs):
-        raise subprocess.CalledProcessError(255, cmd)
+    import sftp
 
-    monkeypatch.setattr(subprocess, "run", boom)
-    with pytest.raises(subprocess.CalledProcessError):
-        list(SSHSource("db1", "/data").fetch(None))
+    def connect(host, *a, **k):
+        if host == "db2":
+            raise TimeoutError()
+        return FakeSession(REMOTE)
+
+    monkeypatch.setattr(sftp, "connect", connect)
+    got = []
+    with pytest.raises(RuntimeError, match="db2: no answer on the SSH port"):
+        for f in ssh(["db1", "db2", "db3"]).fetch(None):
+            got.append(f.node)
+    assert set(got) == {"db1", "db3"}
+
+
+def test_an_unknown_host_key_is_refused_after_the_cluster_was_added(tmp_path):
+    """A capture never learns a key: a changed one is what a man in the middle looks like."""
+    import paramiko
+    import sftp
+    key = tmp_path / "id"
+    sftp.generate_key(key, "test")
+    with pytest.raises(Exception) as e:
+        # Nothing listens on port 9: refused either way, but never with AutoAddPolicy.
+        sftp.connect("127.0.0.1", 9, "u", key, tmp_path / "known_hosts")
+    assert not (tmp_path / "known_hosts").exists()
+    assert not isinstance(e.value, paramiko.BadHostKeyException)
+
+
+def test_a_generated_key_is_private_and_loads(tmp_path):
+    import sftp
+    key = tmp_path / "keys" / "prod_ed25519"
+    line = sftp.generate_key(key, "mongo-health:prod")
+    assert oct(key.stat().st_mode & 0o777) == "0o600"
+    assert line.startswith("ssh-ed25519 ") and line.endswith(" mongo-health:prod")
+    assert sftp.public_line(key, "mongo-health:prod") == line
+
+
+def test_host_entries_carry_the_ssh_port():
+    import sftp
+    assert sftp.split_host("db1") == ("db1", 22)
+    assert sftp.split_host("db1:2222") == ("db1", 2222)
+    assert sftp.split_host("[fe80::1]:2222") == ("fe80::1", 2222)
+    assert sftp.member_name("db1.acme.internal:2222") == "db1.acme.internal"

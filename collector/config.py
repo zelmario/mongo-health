@@ -69,6 +69,14 @@ def load(path: Path) -> dict:
         seen.add(cid)
         if not isinstance(cluster.get("source"), dict):
             raise ConfigError(f'{where} ("{cid}"): needs a "source"')
+        interval = cluster["source"].get("interval")
+        if interval is not None and (not isinstance(interval, int) or not 1 <= interval <= 60):
+            raise ConfigError(f'{where} ("{cid}"): "interval" is seconds between samples, '
+                              f"a whole number from 1 to 60 (got {interval!r})")
+        days = cluster.get("retention_days")
+        if days is not None and (not isinstance(days, int) or days < 1):
+            raise ConfigError(f'{where} ("{cid}"): "retention_days" is a whole number of days '
+                              f"(got {days!r})")
     return cfg
 
 
@@ -78,6 +86,16 @@ def _source(spec: dict) -> dict:
         source.setdefault("public_key", os.environ.get("ATLAS_PUBLIC_KEY", ""))
         source.setdefault("private_key", os.environ.get("ATLAS_PRIVATE_KEY", ""))
     return source
+
+
+def files_only(spec: dict) -> bool:
+    """A cluster that is only the files somebody uploaded, with no connection to send more.
+
+    Its newest sample ageing is not silence: nothing promised data after it. The report judges
+    it as of that sample, and the watchdog leaves it alone.
+    """
+    source = spec.get("source") or {}
+    return source.get("type") == "onprem" and not source.get("uri")
 
 
 def clusters(cfg: dict) -> list[dict]:

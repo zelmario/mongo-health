@@ -88,7 +88,11 @@ export BIGHOLE="$BIGHOLE_DIR"
 # state.json and could send the same finding twice, so the second one steps aside and waits
 # for the next slot rather than queueing behind the first.
 exec 9>"$LOCK"
-if ! flock -n 9; then
+# LOCK_WAIT=1 queues behind the running round instead: the page sets it for a cluster somebody
+# has just added, who is looking at the page and would otherwise wait for the next hour.
+if [ -n "${LOCK_WAIT:-}" ]; then
+  flock 9
+elif ! flock -n 9; then
   say "another run is still going (lock: $LOCK) — skipping this slot"
   exit 0
 fi

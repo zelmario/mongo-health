@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 
 import sources
-from config import ConfigError, load_clusters
+from config import ConfigError, files_only, load_clusters
 from state import State, now
 
 
@@ -46,7 +46,8 @@ def write_roster(data: Path, clusters: list[dict]) -> None:
         "clusters": [{"cluster_id": c["cluster_id"],
                       # How the files arrive decides what the alert tells you to go and look at.
                       "source_kind": (c.get("source") or {}).get("type", "atlas")}
-                     for c in clusters],
+                     # Uploaded files and nothing more: there is no capture to stop.
+                     for c in clusters if not files_only(c)],
     }
     tmp = data / f".{ROSTER}.tmp"
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))

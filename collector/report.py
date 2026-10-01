@@ -75,12 +75,12 @@ h1 { font-size: 1.5rem; font-weight: 600; margin: 0 0 0.3rem; text-wrap: balance
 .card { background: var(--panel); border: 1px solid var(--edge); padding: 1.4rem; }
 label { display: block; font-size: 0.8125rem; font-weight: 600; margin: 0 0 0.3rem; }
 .hint { font-weight: 400; color: var(--ink-faint); }
-input[type=text], input[type=email], input[type=password] {
+input[type=text], input[type=email], input[type=password], textarea, select {
   width: 100%; padding: 0.55rem 0.7rem; margin-bottom: 1rem;
   background: var(--ground); color: var(--ink);
   border: 1px solid var(--edge); border-radius: 0; font: inherit;
 }
-input:focus-visible, button:focus-visible, a:focus-visible {
+input:focus-visible, textarea:focus-visible, button:focus-visible, a:focus-visible {
   outline: 2px solid var(--signal); outline-offset: 2px;
 }
 button {
@@ -88,6 +88,7 @@ button {
   font: 600 0.9375rem var(--sans); cursor: pointer;
 }
 button:hover { background: var(--signal); }
+button:disabled, button:disabled:hover { background: var(--ink-soft); cursor: wait; }
 button.secondary { background: transparent; color: var(--ink-soft);
                    border: 1px solid var(--edge); }
 
@@ -411,6 +412,64 @@ def how_long_ago(ms) -> str:
     return ago(int(seconds // 2592000), "month")
 
 
+def time_labels(at: list[datetime]) -> list[str]:
+    """Tick labels as precise as the ticks are close, with the date only where it changes.
+
+    A fixed `%d %b %H:%M` printed "28 Sep 11:07" twice on a four-minute chart ticked every
+    30 seconds, and repeated the same date on every tick of a chart that covers one day.
+    """
+    step = min(((b - a).total_seconds() for a, b in zip(at, at[1:])), default=3600)
+    if step >= 86400:
+        return [t.strftime("%d %b") for t in at]
+    clock = "%H:%M:%S" if step < 60 else "%H:%M"
+    out, day = [], None
+    for t in at:
+        out.append(t.strftime(clock if t.date() == day else f"%d %b {clock}"))
+        day = t.date()
+    return out
+
+
+def _time_axis():
+    """`time_labels` as a matplotlib formatter, built here because matplotlib is imported late."""
+    import matplotlib.dates as mdates
+    import matplotlib.ticker as mticker
+
+    class TimeAxis(mticker.Formatter):
+        def __call__(self, x, pos=None):
+            return self.format_ticks([x])[0]
+
+        def format_ticks(self, values):
+            return time_labels([mdates.num2date(v, tz=timezone.utc) for v in values])
+
+    return TimeAxis()
+
+
+def _episode_label(t: datetime, start: datetime, end: datetime) -> str:
+    """With seconds when the chart is short: two episodes a minute apart read "11:09" twice."""
+    return t.strftime("%H:%M:%S" if (end - start).total_seconds() < 2 * 3600 else "%H:%M")
+
+
+def _label_rows(at: list[datetime], start: datetime, end: datetime,
+                rows: int = 2) -> list[tuple[int, int]]:
+    """(index, row) for each episode label that fits, in the first row with room.
+
+    Episodes seconds apart put their labels on top of each other ("11:11:08"). A second row
+    takes the next one; past that it is left out, and its shaded band still marks it.
+    """
+    span = (end - start).total_seconds() or 1
+    width = (0.075 if span < 2 * 3600 else 0.05)  # of the axes width, for "HH:MM:SS" / "HH:MM"
+    last = [float("-inf")] * rows
+    placed = []
+    for i, t in enumerate(at):
+        x = (t - start).total_seconds() / span
+        for row in range(rows):
+            if x >= last[row] + width:
+                last[row] = x
+                placed.append((i, row))
+                break
+    return placed
+
+
 def incident_chart(chart: dict | None, severity: str, worst_from: int, worst_to: int,
                    rule: str = "", metric: str = "",
                    window: tuple[int, int] | None = None) -> str | None:
@@ -438,7 +497,7 @@ def incident_chart(chart: dict | None, severity: str, worst_from: int, worst_to:
     PANEL, INK, SOFT, EDGE, SIGNAL = "#171c23", "#e7ecf3", "#93a0ae", "#262d37", "#f0a538"
     times = [datetime.fromtimestamp(ms / 1000, timezone.utc) for ms in chart["t"]]
 
-    fig, ax = plt.subplots(figsize=(8.4, 2.0), dpi=140)
+    fig, ax = plt.subplots(figsize=(CHART_IN[0], CHART_IN[1]), dpi=CHART_DPI)
     fig.patch.set_facecolor(PANEL)
     ax.set_facecolor(PANEL)
 
@@ -509,10 +568,11 @@ def incident_chart(chart: dict | None, severity: str, worst_from: int, worst_to:
         # question is always "when" -- which the axis can only answer by squinting at a shaded
         # band. Skipped when there is only one: the card already states its time.
         if len(crossings) > 1:
-            for a, b in crossings:
-                ax.annotate(times[a].strftime("%H:%M"),
+            for i, row in _label_rows([times[a] for a, _ in crossings], times[0], times[-1]):
+                a = crossings[i][0]
+                ax.annotate(_episode_label(times[a], times[0], times[-1]),
                             xy=(times[a], 1.0), xycoords=("data", "axes fraction"),
-                            xytext=(2, -9), textcoords="offset points",
+                            xytext=(2, -9 - 11 * row), textcoords="offset points",
                             fontsize=7, color=colour, ha="left", va="top", zorder=4,
                             # On a spiky metric the peak is exactly where this label goes, and
                             # the two were unreadable on top of each other.
@@ -644,8 +704,10 @@ def incident_chart(chart: dict | None, severity: str, worst_from: int, worst_to:
                       fontsize=7.5, labelcolor=SOFT, handlelength=1.8,
                       ncol=len(series) + 1)
         else:
-            ax.legend(loc="lower left" if higher_is_worse else "upper left", frameon=False,
-                      fontsize=7.5, labelcolor=SIGNAL, handlelength=1.6)
+            # Above the plot, beside the title. Inside it, in a corner, the label sat on its own
+            # line whenever the limit was near that edge -- which is where most limits are.
+            ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), frameon=False,
+                      fontsize=7.5, labelcolor=SIGNAL, handlelength=1.6, borderaxespad=0.2)
 
     ax.set_ylabel(axis_label, fontsize=7.5, color=SOFT)
     # MEASURES is keyed by rule, which cannot name a baseline excursion: the same rule fires on
@@ -653,7 +715,9 @@ def incident_chart(chart: dict | None, severity: str, worst_from: int, worst_to:
     ax.set_title(chart.get("title") or name, fontsize=9, color=INK, loc="left",
                  pad=6, fontweight="600")
     ax.tick_params(labelsize=7, colors=SOFT, length=3, width=0.6)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b %H:%M", tz=timezone.utc))
+    locator = mdates.AutoDateLocator(tz=timezone.utc, minticks=4, maxticks=9)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(_time_axis())
     ax.margins(x=0)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
@@ -663,6 +727,14 @@ def incident_chart(chart: dict | None, severity: str, worst_from: int, worst_to:
     ax.grid(axis="y", color=EDGE, linewidth=0.7, alpha=0.9)
     ax.set_axisbelow(True)
     fig.tight_layout(pad=0.4)
+    # tight_layout leaves the axis label hanging off the left edge when the legend sits below
+    # the axes, and "tickets" came out as "ickets". Measured after a draw -- before one the
+    # label has not been placed yet -- and moved in.
+    fig.canvas.draw()
+    overhang = -ax.yaxis.label.get_window_extent().x0
+    if overhang > 0:
+        width = fig.get_size_inches()[0] * fig.dpi
+        fig.subplots_adjust(left=fig.subplotpars.left + (overhang + 4) / width)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", facecolor=PANEL)
@@ -670,7 +742,13 @@ def incident_chart(chart: dict | None, severity: str, worst_from: int, worst_to:
     return buf.getvalue()
 
 
-CHART_W, CHART_H = 1176, 280      # 8.4in x 2.0in at 140 dpi, as drawn above
+# 2.6in tall, not 2.0: at 2.0 a page width flattened every episode into a line. 200 dpi so the
+# enlarged view, a click away, is as sharp as the one on the page.
+CHART_IN, CHART_DPI = (8.4, 2.6), 200
+CHART_W, CHART_H = round(CHART_IN[0] * CHART_DPI), round(CHART_IN[1] * CHART_DPI)
+# Part of every chart's name: a change to how charts are drawn redraws the ones already held,
+# which are otherwise kept for ever because what they show never changes.
+CHART_STYLE = 4
 
 
 def has_chart(finding: dict) -> bool:
@@ -738,6 +816,14 @@ button.link:hover { color:var(--ink); }
    container and inherited nothing. `max-width` as well as `width` so it cannot happen again
    from a parent that sizes differently. */
 .shape { width: 100%; max-width: 100%; height: auto; display: block; }
+/* Wider where there are charts: at 44rem they were drawn at half their size. The prose keeps a
+   line a person can read. */
+.wrap:has(img.shape) { max-width: 64rem; }
+.wrap:has(img.shape) p { max-width: 46rem; }
+img.shape { cursor: zoom-in; }
+.zoom { position: fixed; inset: 0; z-index: 10; background: rgb(0 0 0 / .85); display: flex;
+        align-items: center; justify-content: center; cursor: zoom-out; padding: 2vh 2vw; }
+.zoom img { max-width: 100%; max-height: 100%; width: auto; height: auto; }
 .finding .shape { margin: 0.9rem 0 0.3rem; }
 .finding .metric { font-family: var(--mono); font-size: 0.6875rem; color: var(--ink-faint);
                    margin-bottom: 0.5rem; word-break: break-all; }
@@ -819,6 +905,11 @@ button.link:hover { color:var(--ink); }
 
 .aside { margin: 1rem 0 0; font-size: .875rem; }
 .aside a { color: var(--ink-soft); }
+.keep { margin: 3rem 0 0; font-size: .875rem; color: var(--ink-soft); }
+.keep + .remove { margin-top: .6rem; padding-top: 0; border-top: none; }
+.remove { margin: 3rem 0 0; padding-top: 1rem; border-top: 1px solid var(--edge-soft);
+          font-size: .875rem; }
+.remove a { color: var(--bad); }
 
 /* The history: same anatomy as a finding card, without the chart and without the accent --
    nothing here is asking for attention. */
@@ -878,6 +969,9 @@ label.link { display: inline; font-weight: 400; color: var(--signal); text-decor
              cursor: pointer; font-size: inherit; margin: 0; }
 .upload { padding: .7rem 0; border-bottom: 1px solid var(--edge-soft); }
 .upload .use-bar { margin-top: .4rem; }
+.progress { display: flex; gap: .6rem; align-items: center; margin-top: .6rem; max-width: 32rem; }
+.progress .meta { font-size: .875rem; color: var(--ink-soft); white-space: nowrap; }
+.progress .use-bar::after { background: var(--ink-soft); transition: width .4s; }
 .upload ul { margin: .4rem 0 0; padding-left: 1.1rem; font-size: .875rem; color: var(--ink-soft); }
 .upload.failed .meta { color: var(--bad); }
 
@@ -944,6 +1038,10 @@ ol.config .who { font-family: var(--mono); font-size: .8rem; color: var(--ink-fa
 [data-state="attention"] { --v: var(--warn); }
 [data-state="at_risk"] { --v: var(--bad); }
 [data-state="unwatched"] { --v: var(--signal); }
+[data-state="analyzing"], [data-state="pending"], [data-state="waiting"] { --v: var(--ink-soft); }
+[data-state="failed"] { --v: var(--bad); }
+[data-state="files_problems"] { --v: var(--warn); }
+[data-state="files_clean"] { --v: var(--ok); }
 .verdict-label { color: var(--v); font-weight: 700; font-size: 1.125rem; margin-bottom: .25rem; }
 .verdict p { margin: 0; color: var(--ink-soft); }
 .verdict a { color: var(--ink); }
@@ -1039,15 +1137,35 @@ def layout(title: str, body: str, root: str, generated: datetime) -> str:
 {body}
 <footer>Rebuilt after every collector run. Times are UTC. Analysis by
   <a href="https://github.com/zelmario/Big-hole">Big Hole</a>.</footer>
-</div></body></html>"""
+</div><script>{ZOOM_JS}</script></body></html>"""
+
+
+# A chart, a click away from filling the screen; a click or Esc puts it back.
+ZOOM_JS = r"""
+document.addEventListener('click', (e) => {
+  const open = document.querySelector('.zoom');
+  if (open) { open.remove(); return; }
+  const img = e.target.closest('img.shape');
+  if (!img) return;
+  const zoom = document.createElement('div');
+  zoom.className = 'zoom';
+  zoom.innerHTML = '<img alt="">';
+  zoom.firstChild.src = img.currentSrc || img.src;
+  zoom.firstChild.alt = img.alt;
+  document.body.appendChild(zoom);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') document.querySelector('.zoom')?.remove();
+});
+"""
 
 
 def chart_name(finding: dict) -> str:
     """Named by what is drawn, not by which finding it belongs to: a re-analysis that changes
     the series produces a new file, and nothing has to remember to invalidate the old one."""
     import hashlib
-    return hashlib.sha256(json.dumps(finding["chart"], sort_keys=True).encode()
-                          ).hexdigest()[:16] + ".png"
+    drawn = {"style": CHART_STYLE, "chart": finding["chart"]}
+    return hashlib.sha256(json.dumps(drawn, sort_keys=True).encode()).hexdigest()[:16] + ".png"
 
 
 def draw_chart(finding: dict, charts: Path) -> str | None:
@@ -1092,16 +1210,72 @@ def silent_hours(state: dict, now: datetime, summary: dict | None = None) -> flo
     Worked out from timestamps and the clock when the page is built, never read from a stored
     "healthy" flag -- the collector having stopped is exactly when such a flag would be wrong.
     """
+    at = newest_sample(state, summary)
+    if at is None:
+        return None
+    hours = (now - at).total_seconds() / 3600
+    return hours if hours > STALE_AFTER_HOURS else None
+
+
+ANALYZING_FOR_AT_MOST_HOURS = 6
+
+
+def read_json(path: Path) -> dict | None:
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def arriving(base: Path) -> dict | None:
+    """What has reached `incoming/` for a cluster that has not been captured yet.
+
+    `members` counts the members the poller is reading without error, or that have files
+    waiting; `error` is the first error the poller reported, said as it said it.
+    """
+    incoming = base / "incoming"
+    if not incoming.is_dir():
+        return None
+    try:
+        status = json.loads((incoming / "status.json").read_text())
+    except (OSError, ValueError):
+        status = {}
+    members = status.get("members") or {}
+    error = status.get("error") or next((m["error"] for m in members.values()
+                                         if isinstance(m, dict) and m.get("error")), None)
+    if error:
+        return {"error": error}
+    reading = {k for k, m in members.items() if isinstance(m, dict) and m.get("last_sample")}
+    with_files = {d.name for d in incoming.iterdir() if d.is_dir() and any(d.glob("metrics.*"))}
+    n = max(len(reading), len(with_files))
+    return {"members": n} if n else None
+
+
+def analyzing(base: Path, now: datetime) -> dict | None:
+    """What an analysis running over this cluster is reading, if one is.
+
+    One older than any analysis takes is a run that was killed before it could clear it, and
+    trusting it would say "Analyzing FTDC" for ever.
+    """
+    try:
+        marker = json.loads((base / "analyzing.json").read_text())
+        started = datetime.fromisoformat(marker["started"].replace("Z", "+00:00"))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return marker if (now - started).total_seconds() < ANALYZING_FOR_AT_MOST_HOURS * 3600 else None
+
+
+def newest_sample(state: dict, summary: dict | None = None) -> datetime | None:
+    """The newest sample held, or, before there is an analysis, when files last arrived."""
     samples = [n.get("to") for n in (summary or {}).get("nodes") or [] if n.get("to")]
     last = max(samples) if samples else (state.get("last_new_data") or state.get("last_capture"))
     if not last:
         return None
     try:
-        at = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        return datetime.fromisoformat(last.replace("Z", "+00:00"))
     except ValueError:
         return None
-    hours = (now - at).total_seconds() / 3600
-    return hours if hours > STALE_AFTER_HOURS else None
 
 
 def how_long_silent(hours: float) -> str:
@@ -1212,7 +1386,8 @@ def card(g, cluster_id: str, findings: list[dict], chart_file, muted: set[str]) 
           <details>
             <summary>What to check next</summary>
             <p>{esc(f.get('check') or '')}</p>
-            <p><a href="../rules.html#{esc(catalog.anchor(g.rule))}">About this check</a> —
+            <p><a href="../rules.html#{esc(catalog.anchor(g.rule))}" target="_blank"
+               rel="noopener">About this check</a> —
                what it measures and why at that threshold.</p>
           </details>
           {hushed}
@@ -1220,7 +1395,55 @@ def card(g, cluster_id: str, findings: list[dict], chart_file, muted: set[str]) 
         </article>"""
 
 
-def verdict_block(v: Verdict, state: dict, incidents: str) -> str:
+# Polls the server for how far an analysis has got. When it has finished, waits for the page
+# itself to be rebuilt before reloading: reloading straight away showed the old page again, which
+# started polling again, and reloaded in a loop until the rebuild landed.
+PROGRESS_JS = r"""
+(function () {
+  if (window.__progress || location.protocol === 'file:') return;
+  window.__progress = true;
+  const els = Array.from(document.querySelectorAll('[data-progress]'));
+  const short = (n) => String(n).split('.')[0].replace(/_\d+$/, '');
+  function draw(el, p) {
+    const bar = el.querySelector('.use-bar'), meta = el.querySelector('.meta');
+    if (p.stage === 'checks') {
+      bar.style.setProperty('--w', '100%');
+      meta.textContent = 'running the checks…';
+    } else if (p.total) {
+      bar.style.setProperty('--w', (100 * p.done / p.total).toFixed(0) + '%');
+      meta.textContent = p.done + ' of ' + p.total + ' files' + (p.node ? ' · ' + short(p.node) : '');
+    }
+  }
+  function settled() {
+    fetch(location.href, { cache: 'no-store' }).then((r) => r.text()).then((t) => {
+      if (t.includes('data-progress')) setTimeout(settled, 3000); else location.reload();
+    }).catch(() => setTimeout(settled, 3000));
+  }
+  function tick() {
+    Promise.all(els.map((el) => fetch(el.dataset.progress, { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((p) => { if (p.analyzing) { draw(el, p); return false; } return true; })
+      .catch(() => false)))
+      .then((finished) => {
+        if (finished.some(Boolean)) {
+          els.forEach((el) => { el.querySelector('.meta').textContent = 'finished, updating the page…'; });
+          settled();
+        } else setTimeout(tick, 2000);
+      });
+  }
+  tick();
+})();
+"""
+
+
+def progress_bar(url: str) -> str:
+    """Filled in by PROGRESS_JS from the server; opened from disk there is none to ask."""
+    return (f'<div class="progress needs-server" data-progress="{esc(url)}">'
+            f'<div class="use-bar" style="--w:0%"></div><span class="meta">starting…</span></div>'
+            f'<script>{PROGRESS_JS}</script>')
+
+
+def verdict_block(v: Verdict, state: dict, incidents: str, progress: str = "") -> str:
     """The answer, before any of the evidence. `incidents` is the relative path to the
     incident pages, so the moment that decided it is one click away."""
     link = ""
@@ -1240,6 +1463,7 @@ def verdict_block(v: Verdict, state: dict, incidents: str) -> str:
     <section class="verdict" data-state="{esc(v.state)}">
       <div class="verdict-label">{esc(v.label)}</div>
       <p>{esc(v.reason)}{link}</p>
+      {progress_bar(progress) if progress and v.state == "analyzing" else ""}
       {causes}
     </section>"""
 
@@ -1376,7 +1600,7 @@ def config_section(recs: list, configured: bool) -> str:
 def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, older: int,
                  findings: list[dict], chart_file, profile_html: str | None,
                  muted: set[str], now: datetime, verdict: Verdict,
-                 cap: dict | None = None) -> str:
+                 cap: dict | None = None, retention_days: int | None = None) -> str:
     """One cluster: what happened to it, newest first, and what normal looks like there."""
     cutoff = int(now.timestamp() * 1000) - WINDOW_DAYS * 86_400_000
     quiet = silent_hours(state, now, summary)
@@ -1433,7 +1657,7 @@ def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, olde
     body = f"""
     <p><a href="../index.html" class="back">← all clusters</a></p>
     <h1>{esc(cluster_id)}</h1>
-    {verdict_block(verdict, state, "incidents/")}
+    {verdict_block(verdict, state, "incidents/", progress=f"../progress/{cluster_id}")}
     {lede}
     <h2>What happened</h2>
     {'<p class="lede">Newest first. Anything that changed on the cluster sits on the same '
@@ -1444,8 +1668,18 @@ def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, olde
     {config_section(recommend.evaluate(summary.get("nodes", []), now.date()),
                     any(n.get("config") for n in summary.get("nodes", [])))}
     {capacity_section(cap) if cap else ''}
-    {profile}"""
+    {profile}
+    {f'<p class="keep">Raw FTDC kept for {esc(retention_label(retention_days))}. '
+     f'<a class="needs-server" href="../settings/{esc(cluster_id)}">Change</a></p>'
+     if retention_days else ''}
+    <p class="needs-server remove"><a href="../remove/{esc(cluster_id)}">Remove this cluster</a></p>"""
     return layout(f"{cluster_id} · mongo-health", body, "../", now)
+
+
+def retention_label(days: int) -> str:
+    """"3 months" for the lengths the add page offers, the days otherwise."""
+    named = {30: "1 month", 60: "2 months", 90: "3 months", 180: "6 months", 365: "1 year"}
+    return named.get(days, f"{days} days")
 
 
 def page_history(cluster_id: str, older: list, fixed: list, now: datetime) -> str:
@@ -1610,7 +1844,7 @@ def page_incident(cluster_id: str, g, findings: list[dict], chart_file, now: dat
           <h2>What to check</h2>
           <div class="advice">{esc(worst.get('check') or '')}
             <p style="margin:.6rem 0 0"><a href="../../rules.html#{esc(catalog.anchor(g.rule))}"
-               >About this check</a></p></div>
+               target="_blank" rel="noopener">About this check</a></p></div>
           <h2>What each node was doing</h2>
           <p class="lede">One chart per member. If only one moved, the cause is on that host; if
             all of them did, it is the workload or something they share.</p>
@@ -1655,7 +1889,7 @@ def page_rules(now: datetime) -> str:
           {f'<ul class="watched">{listed}</ul>' if listed else ''}
           {f'<details><summary>Why this threshold</summary>{reasoning}</details>' if reasoning else ''}
           <details><summary>What to check</summary><p>{esc(e['check'])}</p></details>
-          {f'<p class="hint">Over a connection string, one sample every ten seconds: '
+          {f'<p class="hint">Over a connection string at the default of one sample every ten seconds: '
            f'{esc(e["ten_seconds"])}.</p>' if e.get('ten_seconds') else ''}
         </article>""")
         sections.append(f"<h2>{esc(name)}</h2>{''.join(cards)}")
@@ -1682,18 +1916,27 @@ def page_index(rows: list[dict], now: datetime) -> str:
 
     items = []
     for r in rows:
-        if not r["captured"]:
+        if not r["captured"] and r["verdict"].state == "waiting":
+            state = "connected, first samples arriving…"
+        elif not r["captured"]:
             state = "configured, nothing captured yet"
+        elif r["verdict"].state == "analyzing":
+            state = "analyzing FTDC…"
         elif r["quiet"] is not None:
             state = (f"nothing collected for {how_long_silent(r['quiet'])} — "
                      f"nobody is watching it right now")
+        elif r.get("ends"):
+            state = (f"FTDC ending {r['ends']:%d %b %H:%M} UTC · "
+                     f"{r['days_raw']:.1f} days of raw data · {r['megabytes']:.0f} MB")
         else:
             state = (f"{r['days_observed']:.1f} days watched · "
                      f"{r['days_raw']:.1f} days of raw data · {r['megabytes']:.0f} MB")
         n = r["recent"]
         word = "incident" if n == 1 else "incidents"
         badge = (f'<a class="count{" none" if not n else ""}" '
-                 f'href="{esc(r["id"])}/index.html">{n} {word}</a>' if r["captured"] else "")
+                 f'href="{esc(r["id"])}/index.html">{n} {word}</a>'
+                 # Mid-analysis, "0 incidents" reads as checked and clean.
+                 if r["captured"] and r["verdict"].state != "analyzing" else "")
         v = r["verdict"]
         items.append(f"""
         <div class="cluster">
@@ -1702,6 +1945,7 @@ def page_index(rows: list[dict], now: datetime) -> str:
               <span class="verdict-pill" data-state="{esc(v.state)}">{esc(v.label)}</span></div>
             <div class="meta">{esc(v.reason)}</div>
             <div class="meta">{esc(state)}</div>
+            {progress_bar(f"progress/{r['id']}") if v.state == "analyzing" else ""}
           </div>
           {badge}
         </div>""")
@@ -1791,15 +2035,25 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
 
     muted = set(spec.get("mute") or [])
     # What somebody marked as fixed no longer decides the verdict. What happens next does.
-    verdict = evaluate([f for f in findings if f["id"] not in settled], now,
-                       silent_hours(state, now, summary),
+    ends = newest_sample(state, summary) if config.files_only(spec) and summary else None
+    quiet = None if config.files_only(spec) else silent_hours(state, now, summary)
+    verdict = evaluate([f for f in findings if f["id"] not in settled], now, quiet,
                        bool(state.get("last_capture")),
-                       float(summary.get("days_of_raw_ftdc") or 0))
+                       float(summary.get("days_of_raw_ftdc") or 0),
+                       analysed=bool(summary), ends=ends, analyzing=analyzing(base, now),
+                       arriving=None if state.get("last_capture") else arriving(base),
+                       failed=read_json(base / "analysis-failed.json"))
+    if verdict.state != "failed" and (stale := read_json(base / "analysis-failed.json")):
+        # What is shown is the analysis before. Said, rather than presented as current.
+        verdict = Verdict(verdict.state, f"{verdict.reason} The latest analysis failed "
+                          f"({stale.get('error')}); this is from the one before it.",
+                          verdict.evidence)
     write(site / "index.html",
           page_cluster(cluster_id, summary, state, recent,
                        len(by_moment(list(older))) + len(fixed),
                        findings, chart_file, profile_section(base, now), muted, now, verdict,
-                       capacity(base, summary, findings, now)))
+                       capacity(base, summary, findings, now),
+                       retention_days=spec.get("retention_days")))
     if older or fixed:
         write(site / "history.html", page_history(cluster_id, older, fixed, now))
     elif (site / "history.html").exists():
@@ -1828,7 +2082,8 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
     return {
         "id": cluster_id,
         "captured": bool(state.get("last_capture")),
-        "quiet": silent_hours(state, now, summary),
+        "quiet": quiet,
+        "ends": ends,
         "days_observed": float(summary.get("days_observed") or 0),
         "days_raw": float(summary.get("days_of_raw_ftdc") or 0),
         "megabytes": float(summary.get("megabytes") or 0),

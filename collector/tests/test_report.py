@@ -50,7 +50,7 @@ def build(tmp: Path, specs: list[dict]) -> Path:
 
 
 # Pages the server answers rather than files the report writes; hidden when opened from disk.
-SERVER_ROUTES = {"add"}
+SERVER_ROUTES = {"add", "../remove/prod", "../settings/prod"}
 
 
 def links_in(page: Path) -> list[str]:
@@ -335,3 +335,72 @@ def test_forms_are_offered_and_hidden_from_disk(tmp_path):
     page = (build(tmp_path, [spec]) / "prod" / "index.html").read_text()
     assert 'action="resolve"' in page and 'name="ids" value="a"' in page
     assert 'class="fixed needs-server"' in page and "from-disk" in page
+
+
+def test_no_incident_count_while_an_analysis_runs(tmp_path):
+    """Mid-analysis, "0 incidents" reads as checked and clean."""
+    spec = cluster(tmp_path / "data", [])
+    (tmp_path / "data" / "prod" / "analyzing.json").write_text(
+        json.dumps({"started": NOW.isoformat(), "files": 81}))
+    index = (build(tmp_path, [spec]) / "index.html").read_text()
+    assert "Analyzing FTDC" in index
+    assert "0 incidents" not in index
+    assert 'data-progress="progress/prod"' in index
+    page = (tmp_path / "site" / "prod" / "index.html").read_text()
+    assert 'data-progress="../progress/prod"' in page
+
+
+def test_no_progress_bar_once_analysed(tmp_path):
+    """The page's script reloads until the bar is gone: a finished page must not carry it."""
+    spec = cluster(tmp_path / "data", [])
+    out = build(tmp_path, [spec])
+    assert "data-progress" not in (out / "index.html").read_text()
+    assert "data-progress" not in (out / "prod" / "index.html").read_text()
+
+
+def test_about_this_check_opens_in_a_new_tab(tmp_path):
+    """Read beside the incident, not instead of it."""
+    spec = cluster(tmp_path / "data", [finding("a")])
+    out = build(tmp_path, [spec])
+    pages = [out / "prod" / "index.html", *(out / "prod" / "incidents").glob("*.html")]
+    links = [m for p in pages for m in re.findall(r'<a [^>]*>About this check</a>', p.read_text())]
+    assert links and all('target="_blank"' in a for a in links)
+
+
+# ------------------------------------------------------------------------- chart text
+
+def test_time_labels_say_seconds_when_ticks_are_seconds_apart():
+    """Ticked every 30 s, "%H:%M" printed every minute twice."""
+    t0 = datetime(2026, 9, 28, 11, 7, tzinfo=timezone.utc)
+    labels = report.time_labels([t0 + timedelta(seconds=30 * i) for i in range(4)])
+    assert labels == ["28 Sep 11:07:00", "11:07:30", "11:08:00", "11:08:30"]
+    assert len(set(labels)) == len(labels)
+
+
+def test_time_labels_give_the_date_only_where_it_changes():
+    t0 = datetime(2026, 9, 28, 18, 0, tzinfo=timezone.utc)
+    labels = report.time_labels([t0 + timedelta(hours=3 * i) for i in range(4)])
+    assert labels == ["28 Sep 18:00", "21:00", "29 Sep 00:00", "03:00"]
+
+
+def test_episode_labels_close_together_do_not_overlap():
+    """Two episodes seconds apart: the second goes to the next row, a third is left out."""
+    t0 = datetime(2026, 9, 28, 11, 7, tzinfo=timezone.utc)
+    end = t0 + timedelta(minutes=4)
+    at = [t0 + timedelta(seconds=s) for s in (60, 66, 70, 200)]
+    placed = report._label_rows(at, t0, end)
+    assert placed == [(0, 0), (1, 1), (3, 0)]
+
+
+def test_a_new_connected_cluster_says_its_samples_are_arriving(tmp_path):
+    base = tmp_path / "data" / "fresh"
+    (base / "incoming" / "db1_27017").mkdir(parents=True)
+    (base / "incoming" / "db1_27017" / "metrics.2026-10-01T18-19-48Z-00000").write_bytes(b"x")
+    (base / "incoming" / "status.json").write_text(json.dumps({"error": None, "members": {
+        "db1:27017": {"error": None, "last_sample": "2026-10-01T18:20:07+00:00"},
+        "db2:27017": {"error": None, "last_sample": "2026-10-01T18:20:07+00:00"}}}))
+    spec = {"cluster_id": "fresh", "source": {"type": "onprem", "uri": "mongodb://db1/"},
+            "mute": [], "notify": [], "retention_days": 30, "report_url": None}
+    index = (build(tmp_path, [spec]) / "index.html").read_text()
+    assert "Waiting for the first data" in index and "2 members" in index
+    assert "Not being watched" not in index

@@ -1,1 +1,3 @@
 config.json
+# Private keys the add page makes for SFTP sources, and the host keys it confirmed.
+keys/

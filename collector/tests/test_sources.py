@@ -34,7 +34,8 @@ def test_only_the_interim_is_marked_as_such():
 
 def test_build_dispatches_on_type():
     assert isinstance(build({"type": "directory", "path": "/x"}), DirectorySource)
-    assert isinstance(build({"type": "ssh", "host": "h", "path": "/x"}), SSHSource)
+    assert isinstance(build({"type": "ssh", "host": "h", "path": "/x",
+                             "identity": "/k", "known_hosts": "/kh"}), SSHSource)
     assert isinstance(build({"type": "atlas", "group_id": "g", "replica_set": "rs",
                              "public_key": "p", "private_key": "k"}), AtlasSource)
 
@@ -61,7 +62,8 @@ def test_every_source_describes_itself():
     assert "rs1" in build({"type": "atlas", "group_id": "g60", "replica_set": "rs1",
                            "public_key": "p", "private_key": "k"}).describe()
     assert "/mnt/x" in build({"type": "directory", "path": "/mnt/x"}).describe()
-    assert "db1" in build({"type": "ssh", "host": "db1", "path": "/x"}).describe()
+    assert "db1" in build({"type": "ssh", "hosts": ["db1", "db2"], "path": "/x",
+                           "identity": "/k", "known_hosts": "/kh"}).describe()
 
 
 def test_a_description_never_leaks_the_private_key():

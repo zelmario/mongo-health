@@ -41,6 +41,10 @@ from capture import record_usage
 from config import ConfigError, load_clusters
 from state import State, now
 
+ANALYZING = "analyzing.json"
+PROGRESS = "analyzing.progress.json"  # written by the engine as it decodes
+FAILED = "analysis-failed.json"       # the last analysis failed, and how
+
 
 def bighole_path() -> Path:
     """Where the Big Hole checkout that acts as the engine lives.
@@ -81,7 +85,7 @@ def sync_runner(repo: Path) -> Path:
 
 
 def run_engine(ftdc: Path, since: str | None, timeout: int = 1800,
-               daily: Path | None = None) -> dict:
+               daily: Path | None = None, progress: Path | None = None) -> dict:
     """Invoke the runner inside Big Hole and return its JSON.
 
     stdout is the JSON and stderr is for humans; they are kept apart so that decode progress
@@ -98,6 +102,8 @@ def run_engine(ftdc: Path, since: str | None, timeout: int = 1800,
         cmd += ["--since", since]
     if daily is not None:
         cmd += ["--daily", str(daily)]
+    if progress is not None:
+        cmd += ["--progress", str(progress.resolve())]
 
     r = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
@@ -214,6 +220,9 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
 
     if verbose:
         print(f"[{cluster_id}] {len(pending)} new file(s)")
+    # For the page: while this is on disk it says "Analyzing FTDC" rather than whatever the last
+    # verdict was. A first upload takes minutes, and the page meanwhile said "Not being watched".
+    (base / ANALYZING).write_text(json.dumps({"started": now(), "files": len(pending)}))
 
     t0 = time.monotonic()
     # Not just the new files: an episode can start in an old file and end in a new one, and
@@ -222,7 +231,7 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
     # per-day summaries in `daily/`. What bounds the noise is `--since`, which drops findings
     # that already closed before the last run.
     since = None if redo else state.last_analysis
-    out = run_engine(ftdc, since, daily=base / "daily")
+    out = run_engine(ftdc, since, daily=base / "daily", progress=base / PROGRESS)
 
     stamp = now()
     nodes = out["nodes"]
@@ -398,11 +407,22 @@ def main() -> int:
     failed = 0
     for spec in clusters:
         try:
-            analyze_cluster(spec, args.data, args.redo, verbose=not args.quiet)
+            try:
+                analyze_cluster(spec, args.data, args.redo, verbose=not args.quiet)
+            finally:
+                for name in (ANALYZING, PROGRESS):
+                    (args.data / spec["cluster_id"] / name).unlink(missing_ok=True)
+            (args.data / spec["cluster_id"] / FAILED).unlink(missing_ok=True)
         except Exception as e:
             # Same as in capture: one cluster failing does not stop the others, and the error
             # is loud on purpose.
             failed += 1
+            # For the page, which otherwise went on promising an analysis that had already
+            # ended. Not for a cluster with nothing captured: that is waiting, not failing.
+            base = args.data / spec["cluster_id"]
+            if (base / "ftdc").is_dir():
+                (base / FAILED).write_text(json.dumps(
+                    {"at": now(), "error": f"{type(e).__name__}: {str(e)[-300:]}"}))
             print(
                 f"[{spec['cluster_id']}] FAILED: "
                 f"{type(e).__name__}: {e}",

@@ -112,9 +112,17 @@ against a three-member set.
 
 ```json
 { "type": "directory", "path": "/mnt/captures/rs-prod" }
-{ "type": "ssh", "host": "db1.internal", "path": "/var/lib/mongodb/diagnostic.data",
-  "user": "readonly", "identity": "/keys/acme" }
+{ "type": "onprem", "uri": "mongodb://mongo-health:…@db1,db2,db3/?replicaSet=rs0", "interval": 10 }
+{ "type": "ssh", "hosts": ["db1.internal", "db2.internal", "db3.internal"],
+  "path": "/diagnostic.data", "user": "mongo-health-ftdc",
+  "identity": "/etc/bighole/keys/rs-prod_ed25519",
+  "known_hosts": "/etc/bighole/keys/rs-prod.known_hosts" }
 ```
+
+The add page offers the first two, which need nothing changed on a database host. `interval` is
+the poller's seconds between samples, 10 unless set; the page prices each choice with the
+cluster's own sample size. `ssh` is configured by hand, for an operator who already runs those
+hosts; see below.
 
 **Layout for a replica set.** One directory per member, named after the host. Both of these are
 recognised, which covers the two ways people hand a capture over:
@@ -135,28 +143,69 @@ the report should name the machine an operator can log into.
 
 Both are supported because they suit different customers, and the difference is who opens what.
 
-**We pull, over restricted SFTP.** No new service: `sshd` is already there and already audited.
-Give us an account that can read the diagnostic directory and nothing else —
+**We pull, over restricted SFTP.** Not offered on the add page: it needs root changes on every
+member, which is more than most teams will make on a database host. For an operator who
+already runs the hosts, it gives the files mongod writes, a sample a second, with no database
+user at all. The source reads each member once a round and downloads only what may have
+changed since the last one: the oldest file still growing, and `metrics.interim`.
 
-```
-Match User bighole
-    ChrootDirectory /var/lib/mongodb
-    ForceCommand internal-sftp
+mongod runs with `umask 077`, so `diagnostic.data` is `drwx------` and its group cannot read it.
+An ACL is the way in, and its default entry is what makes the files mongod creates later
+readable too. A chroot that holds only `diagnostic.data` keeps the user away from every other
+world-readable file, `mongod.conf` included. Tested as written on PSMDB 8.0 on Rocky Linux 8,
+run twice to check it is safe to repeat; SELinux enforcing and Debian/Ubuntu (dbPath
+`/var/lib/mongodb`, service `ssh`) are untested. As root on each member:
+
+```bash
+DIAG=/var/lib/mongo/diagnostic.data          # storage.dbPath + /diagnostic.data
+PUBKEY='ssh-ed25519 AAAA… mongo-health:rs-prod'
+U=mongo-health-ftdc
+
+id -u $U >/dev/null 2>&1 || useradd --system --create-home --shell /sbin/nologin $U
+install -d -m 700 -o $U -g $U /home/$U/.ssh
+grep -qxF "$PUBKEY" /home/$U/.ssh/authorized_keys 2>/dev/null ||
+  echo "$PUBKEY" >> /home/$U/.ssh/authorized_keys
+chown $U: /home/$U/.ssh/authorized_keys; chmod 600 /home/$U/.ssh/authorized_keys
+
+setfacl -m u:$U:x "$(dirname "$DIAG")"
+setfacl -m u:$U:rx "$DIAG"
+setfacl -d -m u:$U:r "$DIAG"
+setfacl -m u:$U:r "$DIAG"/metrics.*
+
+mountpoint -q /srv/$U/diagnostic.data || install -d -m 755 -o root -g root /srv/$U/diagnostic.data
+grep -q " /srv/$U/diagnostic.data " /etc/fstab ||
+  echo "$DIAG /srv/$U/diagnostic.data none bind,ro 0 0" >> /etc/fstab
+mountpoint -q /srv/$U/diagnostic.data || mount /srv/$U/diagnostic.data
+
+grep -qx "Match User $U" /etc/ssh/sshd_config || cat >> /etc/ssh/sshd_config <<SSHD
+
+Match User $U
+    ChrootDirectory /srv/$U
+    ForceCommand internal-sftp -R
+    PasswordAuthentication no
     AllowTcpForwarding no
+    AllowAgentForwarding no
+    X11Forwarding no
     PermitTTY no
+SSHD
+sshd -t && systemctl reload sshd
 ```
 
-— then mount it on our side and point a `directory` source at the mount:
+The `Match` block goes at the end of the file because it applies to everything after it. What
+the user can do afterwards, checked on the test set: list and read `/diagnostic.data`; nothing
+else. Writing, a shell, port forwarding and reading `mongod.conf` are all refused.
 
+On the collector's side, the key and the host keys. Host keys are enforced: a host that
+presents a key not in `known_hosts` stops being read, and the run says so.
+
+```bash
+ssh-keygen -t ed25519 -N '' -C mongo-health:rs-prod -f config/keys/rs-prod_ed25519
+ssh-keyscan -t ed25519 db1.internal db2.internal db3.internal > config/keys/rs-prod.known_hosts
+ssh-keygen -lf config/keys/rs-prod.known_hosts   # compare with each host's own
 ```
-sshfs bighole@db1.internal:/diagnostic.data /mnt/db1 -o ro,IdentityFile=/keys/acme
-```
 
-Anything that mounts works the same way: SFTP, FTP, S3 with `s3fs`, a Windows share. The
-collector never learns the difference — it sees a directory.
-
-*Plain FTP works but we would not suggest it: it adds a service to a database server and sends
-credentials in the clear. `sshd` gives the same restricted access with neither problem.*
+Measured on the three-member test set: the first run brought down 7.5 MB in 0.7 s, and each
+run after it only the open file and `metrics.interim`.
 
 **They push, over HTTPS.** The customer opens nothing at all and we hold no credentials to
 their machines — which stops being a small thing once there are fifty customers. Issue a token
@@ -215,8 +264,9 @@ both cases the safe behaviour is the default and the irreversible one has to be 
 ## Retention
 
 `retention_days` sets how long raw FTDC is kept — per cluster, per customer, or globally, most
-specific first. It defaults to 365 and it is what the customer is paying for, which is why it
-sits in the config next to their clusters rather than in a constant.
+specific first. The add page asks for it, from one month to a year with three months selected,
+because the answer is disk and only the person adding the cluster knows how much there is. A
+cluster written into `config.json` without it gets 365.
 
 Only raw FTDC is pruned. `baseline.jsonl`, `findings.jsonl` and `usage.jsonl` are never
 touched: measured on a real three-node cluster the raw data runs ~20.5 GB a year against ~55 MB
