@@ -129,6 +129,26 @@ def test_falling_free_memory_is_reported_too(tmp_path):
     assert found[0].direction == "down"
 
 
+def test_a_data_disk_filling_up_is_forecast(tmp_path):
+    """The disk the data lives on, under the name the runner gives it on every member, falling
+    towards the same last tenth disk-space-low alarms at."""
+    capacity = 100.0 * GB
+    free = [0.60 * capacity - (0.30 * capacity) * i / 95 for i in range(96)]
+    rows = []
+    for node in ("a", "b", "c"):
+        # As the runner names them: the canonical name, with the mount it resolved to.
+        rows += series(node, "disk.data.available (via systemMetrics.mounts./srv/mongodb.available)",
+                       free)
+        rows += series(node, "disk.data.capacity (via systemMetrics.mounts./srv/mongodb.capacity)",
+                       [capacity] * 96)
+    found = runway.find(write(tmp_path / "b.jsonl", rows))
+    assert [r.metric for r in found] == ["disk.data.available"]
+    assert found[0].direction == "down"
+    finding = runway.as_findings(found, 0, 1)[0]
+    assert "free space on the data disk" in finding["title"]
+    assert "GB" in finding["what"], "in the unit a person sizes a disk in"
+
+
 # ---------------------------------------------------------------- the picture of the claim
 
 def chart_for(tmp_path, rows):

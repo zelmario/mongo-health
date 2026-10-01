@@ -2,7 +2,7 @@
 
 Every check mongo-health runs, what it looks at, when it speaks and why at that threshold. Generated from the code by `collector/catalog.py`; the threshold rules come from `big-hole/src/insights/rules.ts`, reasoning included.
 
-32 threshold rules and 9 detectors.
+34 threshold rules and 9 detectors.
 
 ## Concurrency and queues
 
@@ -243,6 +243,42 @@ Time per operation does not have that problem. It is also the one number here th
 Verified not to fire falsely: across 55,000 samples at rest the longest stretch above 10 ms was a few seconds, nowhere near the sustain below.
 
 **What to check.** Checkpoints and the journal both wait on this, so a slow volume shows up as long checkpoints and stalled writes before anyone thinks to look at storage.
+
+### The data disk is running out of space — `disk-space-low`
+
+**Severity:** warning · **Speaks when:** ≤ 10% for 5 min, dips of up to 60 s tolerated
+
+**Metric:** `pct({dataMount}.available, {dataMount}.capacity)`
+
+Less than a tenth of the disk holding the data is free.
+
+**Why this threshold.** The most common way a mongod stops, and until these nothing watched it: when the volume holding the data fills, writes fail and the process shuts down.
+
+`{dataMount}` is not a metric path. It stands for the mount holding this member's dbPath -- the longest `systemMetrics.mounts.<path>` that is a prefix of `getCmdLineOpts.parsed.storage.dbPath` in the FTDC metadata -- and the collector's runner substitutes it per member before detection. A glob over every mount would be wrong: /dev/shm, /run and the read-only mounts of WSL or a container sit at or near 0% free by design, and would fire on every healthy host.
+
+Measured on the two clusters the coverage audit used: 60% free on Atlas, 70% on the self-managed set, both steady. A disk does not flap, so the duration only has to rule out a momentary reading; the forecast that something is filling belongs to capacity-runway, which tracks this same mount.
+
+Ten percent is the conventional alarm for a database volume: on a large disk it is still gigabytes, enough for compaction and a few days of growth, and it is where the alert is still a plan rather than an emergency. Five percent is the emergency.
+
+**What to check.** What is growing: a collection, the oplog, the journal, or log files left on the data volume. Make room or grow the volume before it fills — when it does, writes fail and mongod shuts down.
+
+### The data disk is almost full — `disk-space-critical`
+
+**Severity:** critical · **Speaks when:** ≤ 5% for 2 min, dips of up to 60 s tolerated
+
+**Metric:** `pct({dataMount}.available, {dataMount}.capacity)`
+
+Less than one twentieth of the disk holding the data is free.
+
+**Why this threshold.** The most common way a mongod stops, and until these nothing watched it: when the volume holding the data fills, writes fail and the process shuts down.
+
+`{dataMount}` is not a metric path. It stands for the mount holding this member's dbPath -- the longest `systemMetrics.mounts.<path>` that is a prefix of `getCmdLineOpts.parsed.storage.dbPath` in the FTDC metadata -- and the collector's runner substitutes it per member before detection. A glob over every mount would be wrong: /dev/shm, /run and the read-only mounts of WSL or a container sit at or near 0% free by design, and would fire on every healthy host.
+
+Measured on the two clusters the coverage audit used: 60% free on Atlas, 70% on the self-managed set, both steady. A disk does not flap, so the duration only has to rule out a momentary reading; the forecast that something is filling belongs to capacity-runway, which tracks this same mount.
+
+Ten percent is the conventional alarm for a database volume: on a large disk it is still gigabytes, enough for compaction and a few days of growth, and it is where the alert is still a plan rather than an emergency. Five percent is the emergency.
+
+**What to check.** This is the emergency: grow the volume or free space now. Compaction itself needs room to run, so it is not a way out from here.
 
 ## Replication
 

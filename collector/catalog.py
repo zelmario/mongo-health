@@ -46,6 +46,7 @@ AREA_OF = {
     "history-store-pinned": "cache",
     "checkpoint-slow": "storage", "disk-read-latency-high": "storage",
     "disk-write-latency-high": "storage",
+    "disk-space-low": "storage", "disk-space-critical": "storage",
     "member-unhealthy": "replication", "replication-lag": "replication",
     "oplog-backlog": "replication", "oplog-churn": "replication",
     "query-targeting-poor": "queries", "collection-scans-sustained": "queries",
@@ -59,7 +60,8 @@ AREA_OF = {
 SIBLING = {"write-tickets-saturated": "read-tickets-saturated",
            "write-tickets-exhausted": "read-tickets-exhausted",
            "write-queue-building": "read-queue-building",
-           "disk-write-latency-high": "disk-read-latency-high"}
+           "disk-write-latency-high": "disk-read-latency-high",
+           "disk-space-critical": "disk-space-low"}
 
 UNIT = {"percent": "%", "ms": " ms", "us": " µs", "bytes": " bytes", "per-sec": "/s",
         "count": ""}

@@ -164,7 +164,44 @@ const TRACKED: Array<{ name: string; expr: string }> = [
   ...GAUGES.map((m) => ({ name: m, expr: m })),
   ...COUNTERS.map((m) => ({ name: `rate(${m})`, expr: `rate(${m})` })),
   ...DERIVED,
+  // The disk holding the data, under one name on every member whatever it is mounted as, so
+  // the baseline and capacity-runway can follow it. See dataMount().
+  { name: 'disk.data.available', expr: '{dataMount}.available' },
+  { name: 'disk.data.capacity', expr: '{dataMount}.capacity' },
 ];
+
+/**
+ * The mount holding this member's data, as the `systemMetrics.mounts.<path>` prefix of its
+ * metrics: the longest mount path that is a prefix of the dbPath in the FTDC metadata.
+ *
+ * Every mount is reported, and most are not the data's: /dev/shm, /run, the read-only mounts of
+ * WSL or a container. Some of those sit at 0% free by design, so watching all of them would
+ * raise a disk alarm on every healthy host. Without a dbPath in the metadata it falls back to
+ * MongoDB's default, /data/db -- which on most hosts resolves to the root mount.
+ */
+function dataMount(paths: ReadonlySet<string>, dbPath: string | undefined): string | undefined {
+  const target = dbPath ?? '/data/db';
+  let best: string | undefined;
+  for (const p of paths) {
+    const m = /^(.*systemMetrics\.mounts\.)(.+)\.available$/.exec(p);
+    if (!m) continue;
+    const mountPath = m[2]!;
+    const prefix = mountPath.endsWith('/') ? mountPath : `${mountPath}/`;
+    if (target !== mountPath && !target.startsWith(prefix)) continue;
+    if (best === undefined || mountPath.length > best.length) best = mountPath;
+  }
+  return best === undefined ? undefined : `systemMetrics.mounts.${best}`;
+}
+
+/** An expression with `{dataMount}` replaced by this member's data mount, or one that resolves
+ * to nothing when the member has none. */
+function withDataMount(expr: string, mount: string | undefined): string {
+  if (!expr.includes('{dataMount}')) return expr;
+  return mount === undefined ? '' : expr.split('{dataMount}').join(mount);
+}
+
+/** Per capture, the data mount found for it. */
+const dataMounts = new Map<string, string | undefined>();
 
 /**
  * The subset drawn as charts in the profile report.
@@ -710,6 +747,7 @@ try {
     const writer = await CaptureWriter.create(store, { captureId, sourceFile: node });
     let hostname: string | undefined;
     let mongoVersion: string | undefined;
+    let dbPath: string | undefined;
 
     for (const file of files) {
       const bytes = new Uint8Array(readFileSync(file));
@@ -718,6 +756,7 @@ try {
           const meta = readMetadata(bytes);
           hostname = meta?.hostname;
           mongoVersion = meta?.version;
+          dbPath = (meta?.doc as any)?.getCmdLineOpts?.parsed?.storage?.dbPath ?? dbPath;
         } catch {
           /* a file without metadata is not a problem: it comes in the next one */
         }
@@ -749,6 +788,8 @@ try {
 
     const paths = new Set(reader.catalog.map((c) => c.path));
     captures.push({ id: captureId, label: hostname ?? node, paths });
+    const mount = dataMount(paths, dbPath);
+    dataMounts.set(captureId, mount);
 
     // Percentiles at full resolution: a baseline must not be taken from already-averaged
     // data, because a p99 over bucket means is not a p99 of anything.
@@ -763,7 +804,7 @@ try {
     const dayMetrics = new Map<number, DaySummary['metrics']>();
     const dayCharts = new Map<number, Record<string, DayChart>>();
     for (const { name, expr } of TRACKED) {
-      const options = expandMetric(expr, paths, prefixes);
+      const options = expandMetric(withDataMount(expr, mount), paths, prefixes);
       if (options.length === 0) continue;
       const resolved = options[0]!;
       try {
@@ -1103,8 +1144,16 @@ try {
   // The baseline is unaffected: it accumulates per run from percentiles already computed, and
   // never re-reads history.
   const windowFrom = sinceMs > 0 ? sinceMs - ANALYSIS_WINDOW_MS : 0;
-  const fromRules = await detect(source, captures, RULES,
-    (windowFrom > 0 ? { from: windowFrom } : {}) as SeriesQuery);
+  const windowQuery = (windowFrom > 0 ? { from: windowFrom } : {}) as SeriesQuery;
+  // Rules written against `{dataMount}` are resolved member by member, each against the mount
+  // holding its own data; everything else runs across all members at once, as before.
+  const perMember = RULES.filter((r) => r.metric.includes('{dataMount}'));
+  const fromRules = [
+    ...await detect(source, captures, RULES.filter((r) => !perMember.includes(r)), windowQuery),
+    ...(await Promise.all(captures.map((c) => detect(source, [c], perMember.map((r) => ({
+      ...r, metric: withDataMount(r.metric, dataMounts.get(c.id)),
+    })), windowQuery)))).flat(),
+  ];
   const findings = [...fromRules, ...gapFindings(nodeSummaries), ...electionFindings(nodeSummaries),
                     ...alarmFindings(nodeSummaries), ...changeFindings(nodeSummaries),
                     ...peerFindings(nodeSummaries)];
@@ -1118,7 +1167,8 @@ try {
   // a rule that found nothing, and that is exactly the failure mode this project keeps
   // running into.
   const unresolved = RULES.filter((r) =>
-    captures.every((c) => expandMetric(r.metric, c.paths, detectRolePrefixes(c.paths)).length === 0),
+    captures.every((c) => expandMetric(withDataMount(r.metric, dataMounts.get(c.id)), c.paths,
+                                       detectRolePrefixes(c.paths)).length === 0),
   ).map((r) => ({ id: r.id, metric: r.metric }));
 
   // Charts only for what is actually going to be sent. The gap findings have no series

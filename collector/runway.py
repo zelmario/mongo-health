@@ -59,6 +59,10 @@ LIMITS: list[tuple[str, str | None, str]] = [
      "serverStatus.wiredTiger.concurrentTransactions.read.totalTickets", "up"),
     ("serverStatus.wiredTiger.concurrentTransactions.write.out",
      "serverStatus.wiredTiger.concurrentTransactions.write.totalTickets", "up"),
+    # The disk holding the data, whatever it is mounted as: the runner tracks that mount under
+    # this name on every member. Its floor is the same last tenth `disk-space-low` alarms at, so
+    # the forecast and the rule speak about the same moment.
+    ("disk.data.available", "disk.data.capacity", "down"),
 ]
 
 # Names a reader recognises. The metric path is in the finding for anyone who wants it.
@@ -68,6 +72,7 @@ PRETTY = {
     "systemMetrics.memory.MemAvailable_kb": "free memory on the host",
     "serverStatus.wiredTiger.concurrentTransactions.read.out": "the read ticket pool",
     "serverStatus.wiredTiger.concurrentTransactions.write.out": "the write ticket pool",
+    "disk.data.available": "free space on the data disk",
 }
 
 # A projection needs a base long enough that it is describing the cluster and not this morning.
@@ -306,7 +311,8 @@ def _human(value: float, metric: str) -> str:
     # host memory into bytes on the way in, and `MemTotal_kb` on this machine stores 16570290176
     # for a 16 GB host. Trusting the name divided by a further 1024 and reported a 16 GB host as
     # 15,801 GB. Found by drawing the chart, whose axis had it right, next to the sentence.
-    if "bytes" in metric or "cache" in metric or metric.endswith("_kb"):
+    if ("bytes" in metric or "cache" in metric or metric.endswith("_kb")
+            or metric.startswith("disk.")):
         for unit, size in (("GB", 1 << 30), ("MB", 1 << 20), ("KB", 1 << 10)):
             if value >= size:
                 return f"{value / size:.1f} {unit}"
@@ -329,6 +335,7 @@ CEILING_NOTE = {
     "systemMetrics.memory.MemAvailable_kb": "a tenth of the host's memory",
     "serverStatus.wiredTiger.concurrentTransactions.read.out": "the read ticket pool",
     "serverStatus.wiredTiger.concurrentTransactions.write.out": "the write ticket pool",
+    "disk.data.available": "a tenth of the data disk",
 }
 
 # FTDC counts bytes; the reader does not. Naming the unit here is what lets the axis come out in
@@ -336,6 +343,7 @@ CEILING_NOTE = {
 CHART_UNIT = {
     "serverStatus.wiredTiger.cache.bytes currently in the cache": "bytes",
     "systemMetrics.memory.MemAvailable_kb": "bytes",
+    "disk.data.available": "bytes",
 }
 
 # How many points to draw along the projected stretch. Enough that it reads as a line rather
@@ -410,7 +418,7 @@ def as_findings(runways: list[Runway], window_from: int, window_to: int) -> list
         else:
             what = (f"{r.pretty.capitalize()} has been falling steadily for "
                     f"{round(r.span_days)} days and is now {_human(r.now, r.metric)} of "
-                    f"{_human(r.limit, r.metric)}. At this rate the host is down to its last "
+                    f"{_human(r.limit, r.metric)}. At this rate it is down to its last "
                     f"tenth in {_when(r.days)}.")
         out.append({
             "rule": "capacity-runway",

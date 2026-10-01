@@ -527,6 +527,57 @@ export const RULES: readonly Rule[] = [
       'checkpoints and stalled writes before anyone thinks to look at storage.',
   },
 
+  /* ------------------------------------------------------- disk space ---- */
+  // The most common way a mongod stops, and until these nothing watched it: when the volume
+  // holding the data fills, writes fail and the process shuts down.
+  //
+  // `{dataMount}` is not a metric path. It stands for the mount holding this member's dbPath --
+  // the longest `systemMetrics.mounts.<path>` that is a prefix of
+  // `getCmdLineOpts.parsed.storage.dbPath` in the FTDC metadata -- and the collector's runner
+  // substitutes it per member before detection. A glob over every mount would be wrong:
+  // /dev/shm, /run and the read-only mounts of WSL or a container sit at or near 0% free by
+  // design, and would fire on every healthy host.
+  //
+  // Measured on the two clusters the coverage audit used: 60% free on Atlas, 70% on the
+  // self-managed set, both steady. A disk does not flap, so the duration only has to rule out a
+  // momentary reading; the forecast that something is filling belongs to capacity-runway, which
+  // tracks this same mount.
+  //
+  // Ten percent is the conventional alarm for a database volume: on a large disk it is still
+  // gigabytes, enough for compaction and a few days of growth, and it is where the alert is
+  // still a plan rather than an emergency. Five percent is the emergency.
+  {
+    id: 'disk-space-low',
+    title: 'The data disk is running out of space',
+    severity: 'warning',
+    metric: 'pct({dataMount}.available, {dataMount}.capacity)',
+    op: '<=',
+    threshold: 10,
+    sustainMs: 300_000,
+    toleranceMs: 60_000,
+    unit: 'percent',
+    what: 'Less than a tenth of the disk holding the data is free.',
+    check:
+      'What is growing: a collection, the oplog, the journal, or log files left on the data ' +
+      'volume. Make room or grow the volume before it fills — when it does, writes fail and ' +
+      'mongod shuts down.',
+  },
+  {
+    id: 'disk-space-critical',
+    title: 'The data disk is almost full',
+    severity: 'critical',
+    metric: 'pct({dataMount}.available, {dataMount}.capacity)',
+    op: '<=',
+    threshold: 5,
+    sustainMs: 120_000,
+    toleranceMs: 60_000,
+    unit: 'percent',
+    what: 'Less than one twentieth of the disk holding the data is free.',
+    check:
+      'This is the emergency: grow the volume or free space now. Compaction itself needs room ' +
+      'to run, so it is not a way out from here.',
+  },
+
   /* --------------------------------------------------- replica set health ---- */
   // Nothing to calibrate: `health` is the heartbeat verdict, 1 or 0, and 0 means this member
   // has not answered. Never observed at 0 in our captures — three members, 55,000 samples,

@@ -48,7 +48,10 @@ cache, connections, memory and tickets, but not the disk.
 - **Data:** `systemMetrics.mounts.<path>.available` and `.capacity` for every mount, and the
   `dbPath` in the metadata (`getCmdLineOpts.parsed.storage.dbPath`), so the mount holding the
   data can be picked as the longest mount path that prefixes it.
-- **Measured:** root disk 60% free on Cluster1, 70% on rs-local, both steady.
+- **Measured:** on Cluster1 the data is not on the root disk at all: Atlas mounts it at
+  `/srv/mongodb`, a 9.9 GB volume with 28.8% free — against 60% free on the root disk, which is
+  what a check on `/` would have watched. On rs-local the data is on `/`, 70–77% free.
+- **Done (disk-space-low, disk-space-critical, and the disk in capacity-runway).**
 - **Proposal:** add the dbPath mount to the runway's limits ("at this rate the disk is full in N
   days"), plus a plain threshold rule for a disk already under 10% free.
 
