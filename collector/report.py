@@ -640,6 +640,14 @@ def incident_chart(chart: dict | None, severity: str, worst_from: int, worst_to:
         return float("nan") if v is None or v != v else v / scale
 
     shades = [colour, "#6b7683", "#5b6570"]
+    # The subject's spread inside each bucket, under its mean. A bucket on a three-hour chart
+    # is ~45 s, and a condition that holds for 20 s at a time averages away: the read-ticket
+    # pool that emptied again and again showed as a line that never came near empty. The band
+    # is where the samples actually went; the line is still the mean.
+    if series and series[0].get("lo") and series[0].get("hi"):
+        ax.fill_between(times, [rescale(v) for v in series[0]["lo"]],
+                        [rescale(v) for v in series[0]["hi"]], color=colour, alpha=0.22,
+                        linewidth=0, zorder=2, label=None)
     for i, s in enumerate(series):
         ax.plot(times, [rescale(v) for v in s["v"]], color=shades[i % len(shades)],
                 linewidth=1.2 if i == 0 else 0.9,
@@ -748,7 +756,7 @@ CHART_IN, CHART_DPI = (8.4, 2.6), 200
 CHART_W, CHART_H = round(CHART_IN[0] * CHART_DPI), round(CHART_IN[1] * CHART_DPI)
 # Part of every chart's name: a change to how charts are drawn redraws the ones already held,
 # which are otherwise kept for ever because what they show never changes.
-CHART_STYLE = 4
+CHART_STYLE = 5
 
 
 def has_chart(finding: dict) -> bool:

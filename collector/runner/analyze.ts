@@ -610,6 +610,14 @@ interface ChartSeries {
   label: string;
   v: number[];
   /**
+   * The lowest and highest sample in each bucket, for the subject only. A bucket is ~45 s on
+   * a three-hour chart, and its mean hides what a second-by-second condition did inside it: a
+   * read-ticket pool emptied for 22 s at a time averaged to 23% checked out, and the chart
+   * showed a pool that never got near empty during an episode the detector had right.
+   */
+  lo?: number[];
+  hi?: number[];
+  /**
    * The unit these values are in AFTER the reader's normalisation, not the one the path name
    * suggests. `systemMetrics.memory.MemTotal_kb` arrives in bytes because `PATH_SCALES` has
    * already multiplied it by 1024; a consumer that trusts the `_kb` suffix labels a 1.8 GiB
@@ -651,6 +659,33 @@ function derivedThreshold(
     Number.isFinite(total) ? Math.round(total * share * 100) / 100 : NaN);
 }
 
+/**
+ * The ticket rules' line, in the chart's own terms.
+ *
+ * They test `pct(out, totalTickets) >= X` and draw `available` against `totalTickets`. Every
+ * sample of the test set had out + available = totalTickets (1438 of 1439 over 24 minutes), so
+ * the condition is exactly `available <= totalTickets * (1 - X/100)`: at X = 50, half the
+ * pool. Unlike the general case above this is arithmetic the reader can check on the chart --
+ * the line sits at half the height of the dashed `totalTickets` -- which is why it is drawn.
+ */
+const TICKET_RULES: ReadonlySet<string> = new Set([
+  'read-tickets-saturated', 'write-tickets-saturated',
+]);
+
+function ticketThreshold(
+  rule: { id: string; metric: string; threshold?: number } | undefined,
+  drawn: ChartSeries[],
+): { line: number[]; note: string } | null {
+  if (!rule || !TICKET_RULES.has(rule.id) || rule.threshold == null || drawn.length < 2) return null;
+  const left = 1 - rule.threshold / 100;
+  const share = left === 0.5 ? 'half the pool' : `${Math.round(left * 100)}% of the pool`;
+  return {
+    line: drawn[1]!.v.map((total) =>
+      Number.isFinite(total) ? Math.round(total * left * 100) / 100 : NaN),
+    note: `${share} available, a problem below this line`,
+  };
+}
+
 async function chartFor(
   finding: Finding,
   reader: CaptureReader,
@@ -661,6 +696,7 @@ async function chartFor(
   series: ChartSeries[];
   threshold: number | null;
   thresholdSeries: number[] | null;
+  thresholdNote?: string;
   fromMs: number;
   toMs: number;
 } | null> {
@@ -703,6 +739,10 @@ async function chartFor(
         // not as a line drawn straight through it.
         v: Array.from(series.mean).map((x) =>
           Number.isFinite(x) ? Math.round(x * 100) / 100 : NaN),
+        ...(drawn.length === 0 ? {
+          lo: Array.from(series.min).map((x) => (Number.isFinite(x) ? Math.round(x * 100) / 100 : NaN)),
+          hi: Array.from(series.max).map((x) => (Number.isFinite(x) ? Math.round(x * 100) / 100 : NaN)),
+        } : {}),
       });
     }
 
@@ -716,6 +756,7 @@ async function chartFor(
       : [subject, ...drawn.slice(1).filter((s) => comparable(subject, s))];
 
     const rule = RULES.find((r) => r.id === finding.ruleId);
+    const tickets = ticketThreshold(rule, keep);
     return {
       t: stamps,
       // `v` stays for anything still reading the single-series shape.
@@ -724,7 +765,8 @@ async function chartFor(
       // The threshold belongs to the tested metric, so it only means something on a chart of
       // that metric. Drawing it over a different series would be a line at an arbitrary height.
       threshold: DISPLAY_METRICS[finding.ruleId] ? null : (rule?.threshold ?? null),
-      thresholdSeries: derivedThreshold(rule, wanted, keep),
+      thresholdSeries: tickets?.line ?? derivedThreshold(rule, wanted, keep),
+      ...(tickets ? { thresholdNote: tickets.note } : {}),
       fromMs: from,
       toMs: to,
     };

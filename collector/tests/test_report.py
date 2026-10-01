@@ -469,3 +469,23 @@ def test_starts_spread_across_the_day_are_not_a_pattern():
     detector is then right to say so."""
     starts = [at_utc(1 + i % 28, (i * 7) % 24, (i * 23) % 60) for i in range(30)]
     assert report.schedule_pattern(starts) is None
+
+
+def test_a_charts_spread_inside_each_bucket_is_drawn(tmp_path):
+    """A pool emptied for 20 s at a time averages away in a 45 s bucket; its minimum does not."""
+    f = finding("t", rule="read-tickets-saturated")
+    n = len(f["chart"]["t"])
+    f["chart"]["series"] = [
+        {"label": "available", "unit": "count", "v": [7.0] * n, "lo": [0.0] * n, "hi": [9.0] * n},
+        {"label": "totalTickets", "unit": "count", "v": [9.0] * n}]
+    f["chart"]["threshold"] = None
+    f["chart"]["thresholdSeries"] = [4.5] * n
+    f["chart"]["thresholdNote"] = "half the pool available, a problem below this line"
+    plain = dict(f, chart=dict(f["chart"], series=[dict(f["chart"]["series"][0], lo=None, hi=None),
+                                                   f["chart"]["series"][1]]))
+    with_band = report.incident_chart(f["chart"], "critical", f["worstFromMs"], f["worstToMs"],
+                                      f["rule"], f["metric"], window=(f["fromMs"], f["toMs"]))
+    without = report.incident_chart(plain["chart"], "critical", f["worstFromMs"], f["worstToMs"],
+                                    f["rule"], f["metric"], window=(f["fromMs"], f["toMs"]))
+    assert with_band and without and with_band != without
+    assert report.chart_name(f) != report.chart_name(plain), "a new picture, a new file"
