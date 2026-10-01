@@ -53,6 +53,10 @@ export const RULES: readonly Rule[] = [
     // The ratio dips whenever the adaptive sizer grows the pool; those dips are part of the
     // episode, not the end of it.
     toleranceMs: 15_000,
+    // Saturated means something waited. Four scans holding four of an eight-ticket pool, with
+    // nothing queued at any moment, was called critical: it is load, not saturation. Required
+    // somewhere in the episode, not at every moment -- see `Rule.during`.
+    during: { metric: 'serverStatus.globalLock.currentQueue.readers', op: '>=', threshold: 1 },
     unit: 'percent',
     what: 'Most of the read ticket pool was checked out, so reads were queueing for a slot.',
     check: 'Read latency and the global lock read queue over the same window, then what was consuming the tickets — a collection scan, a missing index, or storage that stopped keeping up.',
@@ -67,6 +71,10 @@ export const RULES: readonly Rule[] = [
     threshold: 50,
     sustainMs: 60_000,
     toleranceMs: 15_000,
+    // Saturated means something waited. Four scans holding four of an eight-ticket pool, with
+    // nothing queued at any moment, was called critical: it is load, not saturation. Required
+    // somewhere in the episode, not at every moment -- see `Rule.during`.
+    during: { metric: 'serverStatus.globalLock.currentQueue.writers', op: '>=', threshold: 1 },
     unit: 'percent',
     what: 'Most of the write ticket pool was checked out, so writes were queueing for a slot.',
     check: 'Write latency, the global lock write queue, and cache dirty over the same window — a full pool is usually downstream of eviction falling behind.',
@@ -368,7 +376,7 @@ export const RULES: readonly Rule[] = [
     title: 'Queries scanning far more than they return',
     severity: 'warning',
     metric:
-      'div(rate(serverStatus.metrics.queryExecutor.scannedObjects), rate(serverStatus.metrics.document.returned))',
+      'ratio(rate(serverStatus.metrics.queryExecutor.scannedObjects), rate(serverStatus.metrics.document.returned))',
     op: '>=',
     // 100 documents read per document returned. At rest this cluster never exceeded 2, so the
     // cut sits fifty times above observed normal and still caught 169 seconds of the incident.

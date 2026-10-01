@@ -39,6 +39,7 @@ const rules = RULES.map((r) => ({
   id: r.id, title: r.title, severity: r.severity, metric: r.metric, op: r.op,
   threshold: r.threshold, unit: r.unit, sustainMs: r.sustainMs, toleranceMs: r.toleranceMs ?? 0,
   echoesAnEvent: r.echoesAnEvent ?? false, alongside: (r as any).alongside ?? null,
+  during: (r as any).during ?? null,
   what: r.what, check: r.check, reasoning: reasoning(r.id),
 }));
 

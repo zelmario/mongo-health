@@ -248,6 +248,42 @@ describe('detecting across captures', () => {
     expect(findings).toHaveLength(0);
   });
 
+  // ------------------------------------------------- a condition somewhere in the episode
+
+  const OUT = 'pct(serverStatus.queues.execution.read.out, serverStatus.queues.execution.read.totalTickets)';
+  const QUEUE = 'serverStatus.globalLock.currentQueue.readers';
+  const SAT_PATHS = ['serverStatus.queues.execution.read.out',
+    'serverStatus.queues.execution.read.totalTickets', QUEUE];
+  const saturated: Rule = {
+    id: 'read-tickets-saturated', title: 'Read ticket pool saturated', severity: 'critical',
+    metric: OUT, op: '>=', threshold: 50, sustainMs: 30_000, toleranceMs: 15_000,
+    unit: 'percent', what: '', check: '',
+    during: { metric: QUEUE, op: '>=', threshold: 1 },
+  };
+  const pool = (queue: number[]) => {
+    const t = at(0, 10, 20, 30, 40, 50, 60, 70);
+    const half = f(50, 50, 50, 50, 50, 50, 50, 50);
+    return fakeSource({
+      [OUT]: { t, min: half, max: half },
+      [QUEUE]: { t, min: f(...queue.map(() => 0)), max: f(...queue) },
+    });
+  };
+
+  it('calls half a pool in use with nothing waiting load, not saturation', async () => {
+    // Four scans on an eight-ticket pool, measured: 4 of 8 out for five minutes, no reads
+    // queued at any moment. That was reported as critical.
+    const findings = await detect(pool([0, 0, 0, 0, 0, 0, 0, 0]), [capture('c0', 'n', SAT_PATHS)],
+      [saturated], {});
+    expect(findings).toHaveLength(0);
+  });
+
+  it('reports it when reads queued at any moment of the episode, however briefly', async () => {
+    // The queue is spiky: on the real capture it was non-zero in 3 to 11% of the seconds.
+    const findings = await detect(pool([0, 0, 0, 17, 0, 0, 0, 0]), [capture('c0', 'n', SAT_PATHS)],
+      [saturated], {});
+    expect(findings).toHaveLength(1);
+  });
+
   const slowWire: Rule = {
     id: 'slow-wire-not-server',
     title: 'The server is answering fast; the time is going somewhere else',

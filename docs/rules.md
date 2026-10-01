@@ -8,7 +8,7 @@ Every check mongo-health runs, what it looks at, when it speaks and why at that 
 
 ### Read ticket pool saturated — `read-tickets-saturated`
 
-**Severity:** critical · **Speaks when:** ≥ 50% for 60 s, dips of up to 15 s tolerated
+**Severity:** critical · **Speaks when:** ≥ 50% for 60 s, dips of up to 15 s tolerated; and only if `serverStatus.globalLock.currentQueue.readers` reached ≥ 1 at some point
 
 **Metric:** `pct(serverStatus.wiredTiger.concurrentTransactions.read.out, serverStatus.wiredTiger.concurrentTransactions.read.totalTickets)`
 
@@ -18,23 +18,19 @@ Most of the read ticket pool was checked out, so reads were queueing for a slot.
 
 Measured on a saturated M10 (2 vCPU, 8.0.29) under a deliberate collection-scan storm: `available` hit zero on 132 samples but the longest unbroken run was 3 seconds, so a rule requiring 30 s of continuous exhaustion saw nothing. Over the same window the mean ratio of checked-out tickets to pool size sat at 46-77%, against under 20% at rest -- which separates load from idle cleanly, and is what these rules test instead.
 
-Written against the 7.x paths so the alias table maps them forward to `queues.execution.*` on 8.0; both releases resolve. The ratio dips whenever the adaptive sizer grows the pool; those dips are part of the episode, not the end of it.
+Written against the 7.x paths so the alias table maps them forward to `queues.execution.*` on 8.0; both releases resolve. The ratio dips whenever the adaptive sizer grows the pool; those dips are part of the episode, not the end of it. Saturated means something waited. Four scans holding four of an eight-ticket pool, with nothing queued at any moment, was called critical: it is load, not saturation. Required somewhere in the episode, not at every moment -- see `Rule.during`.
 
 **What to check.** Read latency and the global lock read queue over the same window, then what was consuming the tickets — a collection scan, a missing index, or storage that stopped keeping up.
 
 ### Write ticket pool saturated — `write-tickets-saturated`
 
-**Severity:** critical · **Speaks when:** ≥ 50% for 60 s, dips of up to 15 s tolerated
+**Severity:** critical · **Speaks when:** ≥ 50% for 60 s, dips of up to 15 s tolerated; and only if `serverStatus.globalLock.currentQueue.writers` reached ≥ 1 at some point
 
 **Metric:** `pct(serverStatus.wiredTiger.concurrentTransactions.write.out, serverStatus.wiredTiger.concurrentTransactions.write.totalTickets)`
 
 Most of the write ticket pool was checked out, so writes were queueing for a slot.
 
-**Why this threshold.** MongoDB 8.0 sizes the execution pools adaptively: when it sees pressure it *grows* the pool, so the pathology no longer looks like a pool pinned at zero for half a minute. It looks like a pool that is almost entirely checked out, with `available` flickering through zero for a second at a time.
-
-Measured on a saturated M10 (2 vCPU, 8.0.29) under a deliberate collection-scan storm: `available` hit zero on 132 samples but the longest unbroken run was 3 seconds, so a rule requiring 30 s of continuous exhaustion saw nothing. Over the same window the mean ratio of checked-out tickets to pool size sat at 46-77%, against under 20% at rest -- which separates load from idle cleanly, and is what these rules test instead.
-
-Written against the 7.x paths so the alias table maps them forward to `queues.execution.*` on 8.0; both releases resolve. The ratio dips whenever the adaptive sizer grows the pool; those dips are part of the episode, not the end of it.
+**Why this threshold.** Saturated means something waited. Four scans holding four of an eight-ticket pool, with nothing queued at any moment, was called critical: it is load, not saturation. Required somewhere in the episode, not at every moment -- see `Rule.during`.
 
 **What to check.** Write latency, the global lock write queue, and cache dirty over the same window — a full pool is usually downstream of eviction falling behind.
 
@@ -394,7 +390,7 @@ The oplog holds less than an hour of writes: a secondary that stops for longer t
 
 **Severity:** warning · **Speaks when:** ≥ 100 for 60 s, dips of up to 30 s tolerated
 
-**Metric:** `div(rate(serverStatus.metrics.queryExecutor.scannedObjects), rate(serverStatus.metrics.document.returned))`
+**Metric:** `ratio(rate(serverStatus.metrics.queryExecutor.scannedObjects), rate(serverStatus.metrics.document.returned))`
 
 The server read far more documents than it returned, which is what a query with no usable index looks like from the outside.
 

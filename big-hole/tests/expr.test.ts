@@ -77,6 +77,20 @@ describe('parsing', () => {
 });
 
 describe('evaluation', () => {
+  it('ratio counts a second that examined documents and returned none as the worst, not a gap', () => {
+    // A collection-scan storm whose queries match nothing: div is NaN there, and the detector
+    // reads NaN as a hole in the capture. ratio floors the denominator at one per second.
+    const t = Float64Array.from([0, 1000, 2000, 3000]);
+    const data = raw({ scanned: [0, 2_000_000, 4_000_000, 4_000_000], returned: [0, 0, 5, 5] });
+    const div = evaluate(parseExpr('div(rate(scanned), rate(returned))'), t, data);
+    const ratio = evaluate(parseExpr('ratio(rate(scanned), rate(returned))'), t, data);
+    expect(Number.isNaN(div[1]!)).toBe(true);
+    expect(ratio[1]).toBe(2_000_000);
+    expect(ratio[2]).toBe(400_000);
+    expect(ratio[3]).toBe(0);
+    expect(exprToString(parseExpr('ratio(rate(a), rate(b))'))).toBe('ratio(rate(a), rate(b))');
+  });
+
   it('rates a counter per second', () => {
     const v = evaluate(parseExpr('rate(c)'), t, raw({ c: [10, 20, 40, 40] }));
     expect(Number.isNaN(v[0]!)).toBe(true); // nothing to difference against

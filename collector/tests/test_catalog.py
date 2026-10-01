@@ -59,7 +59,8 @@ def test_every_threshold_rule_says_why():
 
 def test_the_condition_reads_as_a_sentence():
     e = next(e for e in catalog.entries() if e["id"] == "read-tickets-saturated")
-    assert e["how"] == "≥ 50% for 60 s, dips of up to 15 s tolerated"
+    assert e["how"] == ("≥ 50% for 60 s, dips of up to 15 s tolerated; and only if "
+                        "`serverStatus.globalLock.currentQueue.readers` reached ≥ 1 at some point")
 
 
 def test_what_ten_second_samples_change_is_said_where_it_matters():

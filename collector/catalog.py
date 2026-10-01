@@ -93,6 +93,10 @@ def when_it_speaks(r: dict) -> str:
     if r.get("alongside"):
         a = r["alongside"]
         text += f"; only while `{a.get('metric')}` {a.get('op')} {a.get('threshold')} too"
+    if r.get("during"):
+        d = r["during"]
+        dop = "≥" if d.get("op") == ">=" else "≤"
+        text += f"; and only if `{d.get('metric')}` reached {dop} {d.get('threshold')} at some point"
     return text
 
 

@@ -40,6 +40,18 @@ export type Expr =
   | { readonly fn: 'rate'; readonly arg: Expr }
   | { readonly fn: 'pct'; readonly num: Expr; readonly den: Expr }
   | { readonly fn: 'div'; readonly num: Expr; readonly den: Expr }
+  /**
+   * `div` with the denominator floored at one per second.
+   *
+   * For a ratio of rates whose worst case is a zero denominator. Query targeting is documents
+   * examined per document returned, and the worst query targeting is examining millions and
+   * returning none -- which `div` makes NaN, and NaN is a gap to the detector. Measured on a
+   * collection-scan storm: at one sample a second, 90% of the storm's seconds returned
+   * nothing, so the rule saw holes where the problem was. Fewer than one document returned a
+   * second counts as one, so the value is finite, never above the true ratio, and 0 when
+   * nothing was examined either.
+   */
+  | { readonly fn: 'ratio'; readonly num: Expr; readonly den: Expr }
   | { readonly fn: 'sum'; readonly args: Expr[] }
   /**
    * The distance between the highest and lowest of several series, sample by sample.
@@ -73,7 +85,7 @@ export class ExprError extends Error {
   override readonly name = 'ExprError';
 }
 
-const FUNCTIONS = new Set(['rate', 'pct', 'div', 'diff', 'scale', 'sum', 'spread', 'window']);
+const FUNCTIONS = new Set(['rate', 'pct', 'div', 'ratio', 'diff', 'scale', 'sum', 'spread', 'window']);
 
 /* ------------------------------------------------------------------ parse ---- */
 
@@ -142,6 +154,9 @@ export function parseExpr(text: string): Expr {
     case 'div':
       need(2);
       return { fn: 'div', num: parseExpr(args[0]!), den: parseExpr(args[1]!) };
+    case 'ratio':
+      need(2);
+      return { fn: 'ratio', num: parseExpr(args[0]!), den: parseExpr(args[1]!) };
     case 'diff':
       need(2);
       return { fn: 'diff', a: parseExpr(args[0]!), b: parseExpr(args[1]!) };
@@ -183,6 +198,7 @@ export function exprPaths(e: Expr): string[] {
       return exprPaths(e.arg);
     case 'pct':
     case 'div':
+    case 'ratio':
       return [...exprPaths(e.num), ...exprPaths(e.den)];
     case 'diff':
       return [...exprPaths(e.a), ...exprPaths(e.b)];
@@ -307,6 +323,9 @@ export function evaluate(
       return zip(evaluate(e.num, t, raw), evaluate(e.den, t, raw), (x, y) => safeDiv(x, y) * 100);
     case 'div':
       return zip(evaluate(e.num, t, raw), evaluate(e.den, t, raw), safeDiv);
+    case 'ratio':
+      return zip(evaluate(e.num, t, raw), evaluate(e.den, t, raw), (x, y) =>
+        Number.isNaN(x) || Number.isNaN(y) ? NaN : x / Math.max(y, 1));
     case 'diff':
       // A zero operand means the field was never reported -- a replica member that has not
       // checked in yet. Differencing against epoch yields ~56 years of "lag", which reads as
@@ -516,7 +535,8 @@ export function unitOf(e: Expr): Unit {
       const inner = unitOf(e.arg);
       return inner === 'bytes' ? 'bytes/s' : 'per-sec';
     }
-    case 'div': {
+    case 'div':
+    case 'ratio': {
       // A rate over a rate cancels the per-second and leaves the numerator's own unit:
       // ms/s over ops/s is milliseconds per operation. This is what makes the latency and
       // disk-service-time panels read in time rather than as a bare number.
@@ -571,6 +591,8 @@ export function exprToString(e: Expr): string {
       return `pct(${exprToString(e.num)}, ${exprToString(e.den)})`;
     case 'div':
       return `div(${exprToString(e.num)}, ${exprToString(e.den)})`;
+    case 'ratio':
+      return `ratio(${exprToString(e.num)}, ${exprToString(e.den)})`;
     case 'diff':
       return `diff(${exprToString(e.a)}, ${exprToString(e.b)})`;
     case 'scale':

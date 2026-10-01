@@ -64,6 +64,8 @@ function mapLeaves(e: Expr, f: (path: string) => string): Expr {
       return { fn: 'pct', num: mapLeaves(e.num, f), den: mapLeaves(e.den, f) };
     case 'div':
       return { fn: 'div', num: mapLeaves(e.num, f), den: mapLeaves(e.den, f) };
+    case 'ratio':
+      return { fn: 'ratio', num: mapLeaves(e.num, f), den: mapLeaves(e.den, f) };
     case 'diff':
       return { fn: 'diff', a: mapLeaves(e.a, f), b: mapLeaves(e.b, f) };
     case 'sum':
@@ -84,6 +86,7 @@ function children(e: Expr): Expr[] {
       return [e.arg];
     case 'pct':
     case 'div':
+    case 'ratio':
       return [e.num, e.den];
     case 'diff':
       return [e.a, e.b];
@@ -108,6 +111,8 @@ function withChildren(e: Expr, kids: Expr[]): Expr {
       return { fn: 'pct', num: kids[0]!, den: kids[1]! };
     case 'div':
       return { fn: 'div', num: kids[0]!, den: kids[1]! };
+    case 'ratio':
+      return { fn: 'ratio', num: kids[0]!, den: kids[1]! };
     case 'diff':
       return { fn: 'diff', a: kids[0]!, b: kids[1]! };
     case 'window':

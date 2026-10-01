@@ -122,6 +122,21 @@ export interface Rule {
     readonly op: '<=' | '>=';
     readonly threshold: number;
   };
+  /**
+   * A second condition that must have held at some moment of the episode, not at every one.
+   *
+   * For a consequence that comes in bursts. "The read ticket pool was saturated, so reads
+   * queued" is only true if something queued; but the queue is spiky. On a real capture it was
+   * non-zero in 3 to 11% of the seconds a saturated episode lasted, peaking at 17 to 40 --
+   * required at every moment, as `alongside` does, every one of those episodes vanished. Held
+   * anywhere inside the episode, it separates them from four scans holding half of an
+   * eight-ticket pool with nothing waiting, which is load, not saturation.
+   */
+  readonly during?: {
+    readonly metric: string;
+    readonly op: '<=' | '>=';
+    readonly threshold: number;
+  };
   /** What it means, in one sentence. */
   readonly what: string;
   /** What to look at next. */
@@ -315,7 +330,8 @@ export async function detect(
 
       // A rule may expand to several series -- a glob over disks or mounts -- and two rules may
       // want the same expression. Ask for each distinct one once.
-      const wanted: Array<{ rule: Rule; expression: string; alongside: string | undefined }> = [];
+      const wanted: Array<{ rule: Rule; expression: string; alongside: string | undefined;
+                            during: string | undefined }> = [];
       for (const rule of rules) {
         // The second condition resolves through the same expansion as the first, so it gets
         // aliases and role prefixes too. It is not globbed: one companion series, or none.
@@ -323,14 +339,20 @@ export async function detect(
           ? expandMetric(rule.alongside.metric, capture.paths, prefixes)[0]
           : undefined;
         if (rule.alongside && companion === undefined) continue;
+        // Same for the condition required somewhere inside the episode: unreadable, the claim
+        // cannot be made, so the rule says nothing rather than half of it.
+        const during = rule.during
+          ? expandMetric(rule.during.metric, capture.paths, prefixes)[0]
+          : undefined;
+        if (rule.during && during === undefined) continue;
         for (const expression of expandMetric(rule.metric, capture.paths, prefixes)) {
-          wanted.push({ rule, expression, alongside: companion });
+          wanted.push({ rule, expression, alongside: companion, during });
         }
       }
       if (wanted.length === 0) return [];
 
       const expressions = [...new Set(wanted.flatMap(
-        (w) => (w.alongside ? [w.expression, w.alongside] : [w.expression])))];
+        (w) => [w.expression, w.alongside, w.during].filter((x): x is string => x !== undefined)))];
       let payloads: SeriesPayload[];
       try {
         payloads = await source.series(capture.id, expressions, query);
@@ -348,7 +370,7 @@ export async function detect(
       }
 
       const found: Finding[] = [];
-      for (const { rule, expression, alongside } of wanted) {
+      for (const { rule, expression, alongside, during } of wanted) {
         const series = byExpression.get(expression);
         if (series === undefined || series.t.length === 0) continue;
 
@@ -375,7 +397,7 @@ export async function detect(
           }
           guard = masked;
         }
-        const episodes = episodesOf(
+        let episodes = episodesOf(
           series.t,
           guard,
           extreme,
@@ -384,6 +406,23 @@ export async function detect(
           rule.sustainMs,
           rule.toleranceMs ?? 0,
         );
+        if (rule.during && during) {
+          const other = byExpression.get(during);
+          if (other === undefined || other.t.length !== series.t.length) continue;
+          // The companion's most extreme value in the bucket: one queued read anywhere in it is
+          // what the condition asks about.
+          const reach = rule.during.op === '<=' ? other.min : other.max;
+          const { op, threshold } = rule.during;
+          episodes = episodes.filter((e) => {
+            for (let i = 0; i < series.t.length; i++) {
+              const at = series.t[i]!;
+              if (at < e.fromMs || at > e.toMs) continue;
+              const v = reach[i]!;
+              if (!Number.isNaN(v) && (op === '<=' ? v <= threshold : v >= threshold)) return true;
+            }
+            return false;
+          });
+        }
         if (episodes.length === 0) continue;
 
         // Split the run of episodes wherever there is a long quiet stretch: each group is one
