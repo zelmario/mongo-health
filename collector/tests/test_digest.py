@@ -123,3 +123,35 @@ def test_the_newest_conclusion_wins():
     older = {**a_spare_finding(now - 5 * 86_400_000), "what": "older"}
     newer = {**a_spare_finding(now - 1 * 86_400_000), "what": "newer"}
     assert spare_capacity([older, newer], now)["what"] == "newer"
+
+
+# ------------------------------------------------------------ configuration recommendations
+
+def rec(severity: str, title: str):
+    from recommend import Recommendation
+    return Recommendation("ulimits-low", severity, title, "what", f"Fix {title}.", ["db1"])
+
+
+def test_a_setting_to_change_comes_back_every_week():
+    """A setting is true until somebody changes it; the quiet week is where it can repeat."""
+    text = body(compose("c1", [], 10, ["a@x"], SENDER,
+                        recommendations=[rec("warning", "Members run on the same host")]))
+    assert "How it is configured" in text
+    assert "Members run on the same host. Fix Members run on the same host." in text
+
+
+def test_informational_nits_stay_on_the_page():
+    text = body(compose("c1", [], 10, ["a@x"], SENDER,
+                        recommendations=[rec("info", "The data is on ext4")]))
+    assert "configured" not in text and "ext4" not in text
+
+
+def test_a_long_list_is_cut_to_the_first_three():
+    recs = [rec("warning", f"Problem {i}") for i in range(5)]
+    text = body(compose("c1", [], 10, ["a@x"], SENDER, recommendations=recs))
+    assert "Problem 2" in text and "Problem 3" not in text
+    assert "and 2 more on the cluster page" in text
+
+
+def test_a_cluster_with_nothing_to_change_hears_nothing_about_it():
+    assert "configured" not in body(compose("c1", [], 10, ["a@x"], SENDER, recommendations=[]))

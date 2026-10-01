@@ -31,6 +31,7 @@ from email.message import EmailMessage
 from pathlib import Path
 
 import mailheaders
+import recommend
 import config
 from group import group as group_findings, moments
 from state import now
@@ -56,6 +57,10 @@ TEXT = {
     # decisions that between them mean it would never reach anybody. A quiet week is exactly
     # when it is true and exactly when there is room to say it.
     "spare": "And one thing that is not a problem: {what}",
+    # Settings stay true until somebody changes them, so they come back every week -- the
+    # weekly note is the one place a standing fact can repeat without becoming an alarm.
+    "config": "How it is configured, against what MongoDB recommends:",
+    "config_more": "  … and {n} more on the cluster page",
     "footer": "mongo-health · one note a week, whether or not anything happened.",
 }
 
@@ -91,8 +96,14 @@ def read_summary(base: Path) -> dict:
     return json.loads(path.read_text()) if path.exists() else {}
 
 
+# Warnings only, and few: a weekly note that lists every informational nit is skimmed past,
+# and then so are the warnings in it.
+CONFIG_LINES = 3
+
+
 def compose(cluster_id: str, incidents: list, days_held: float, recipients: list[str],
-            sender: str, spare: dict | None = None) -> EmailMessage:
+            sender: str, spare: dict | None = None,
+            recommendations: list | None = None) -> EmailMessage:
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = ", ".join(recipients)
@@ -120,6 +131,13 @@ def compose(cluster_id: str, incidents: list, days_held: float, recipients: list
         # Its own paragraph rather than a line in the incident list. Buried among "things worth
         # a look" it reads as another problem, and it is the opposite of one.
         lines += [TEXT["spare"].format(what=spare.get("what", "")), ""]
+    warnings = [r for r in recommendations or [] if r.severity == "warning"]
+    if warnings:
+        lines.append(TEXT["config"])
+        lines += [f"  - {r.title}. {r.fix}" for r in warnings[:CONFIG_LINES]]
+        if len(warnings) > CONFIG_LINES:
+            lines.append(TEXT["config_more"].format(n=len(warnings) - CONFIG_LINES))
+        lines.append("")
     lines += [
         (TEXT["history"].format(days=days(days_held), atlas=ATLAS_DAYS, extra=days(extra))
          if round(extra) >= 1
@@ -168,7 +186,9 @@ def main() -> int:
         all_findings = read_findings(base)
         msg = compose(spec["cluster_id"], incidents, days_held, recipients, sender,
                       spare=spare_capacity(all_findings, int(datetime.now(timezone.utc)
-                                                             .timestamp() * 1000)))
+                                                             .timestamp() * 1000)),
+                      recommendations=recommend.evaluate(summary.get("nodes", []),
+                                                         datetime.now(timezone.utc).date()))
         if args.send and smtp:
             import smtplib
             with smtplib.SMTP(smtp["host"], int(smtp.get("port", 587)), timeout=60) as server:

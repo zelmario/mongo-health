@@ -34,6 +34,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
@@ -111,6 +112,24 @@ def run(cmd: list[str], quiet: bool) -> bool:
     if r.returncode != 0 and quiet:
         print((r.stderr or r.stdout or "").strip()[-400:], file=sys.stderr)
     return r.returncode == 0
+
+
+def configuration_lines(cluster_id: str, data: Path, recommend) -> str:
+    """The recommendations under the verdict: the first evaluation is the one moment somebody
+    reads everything, and a setting found now is fixed before it becomes an incident."""
+    summary_path = data / cluster_id / "summary.json"
+    if not summary_path.exists():
+        return ""
+    nodes = json.loads(summary_path.read_text()).get("nodes", [])
+    if not any(n.get("config") for n in nodes):
+        return ""
+    recs = recommend.evaluate(nodes, datetime.now(timezone.utc).date())
+    if not recs:
+        return "\n  configuration: nothing to change"
+    out = [f"\n  configuration: {len(recs)} recommendation{'s' if len(recs) != 1 else ''}"]
+    for r in recs:
+        out.append(f"    [{r.severity}] {r.title}\n      {r.fix}")
+    return "\n".join(out)
 
 
 def main() -> int:
@@ -201,10 +220,13 @@ def main() -> int:
     print("\nthe first evaluation")
     import report  # noqa: PLC0415 -- matplotlib is slow to import, and only needed here
 
+    import recommend  # noqa: PLC0415
+
     rows = report.build(config.load_clusters(args.config), args.data, args.site)
     for r in rows:
         if r["id"] in {c["name"] for c in wanted}:
             print(f"\n  {r['id']}: {r['verdict'].label}\n  {r['verdict'].reason}")
+            print(configuration_lines(r["id"], args.data, recommend))
     print(f"\n  the full report: {args.site / 'index.html'}")
     return 0
 
