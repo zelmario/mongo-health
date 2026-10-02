@@ -24,6 +24,8 @@ and rules all live in one place.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -432,6 +434,36 @@ def main() -> int:
                     help="re-analyse everything, ignoring what was analysed before")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
+    with round_lock():
+        return _main(args)
+
+
+def round_lock():
+    """The lock run.sh holds for a whole round, waited for when this runs on its own.
+
+    An analysis loads state.json at the start and saves it at the end. A --redo of Cluster1
+    started by hand between two rounds ran for sixteen minutes, a round captured six new files
+    in the middle of it, and the redo's save put back the state from before them. Inside a
+    round the lock is already held (ROUND_LOCK_HELD), and taking it again would wait for ever.
+    """
+    if os.environ.get("ROUND_LOCK_HELD"):
+        return contextlib.nullcontext()
+
+    @contextlib.contextmanager
+    def held():
+        path = Path(os.environ.get("LOCK") or Path(__file__).resolve().parent / ".run.lock")
+        with open(path, "a") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("a collection round is running; waiting for it to finish",
+                      file=sys.stderr, flush=True)
+                fcntl.flock(fh, fcntl.LOCK_EX)
+            yield
+    return held()
+
+
+def _main(args) -> int:
 
     if shutil.which("npx") is None:
         print("npx is missing: the analysis engine runs inside Big Hole", file=sys.stderr)

@@ -96,6 +96,9 @@ elif ! flock -n 9; then
   say "another run is still going (lock: $LOCK) — skipping this slot"
   exit 0
 fi
+# The steps below hold the round's lock through this shell. Said to them, so a step that takes
+# the lock when run on its own (analyze.py) does not wait for its own parent.
+export ROUND_LOCK_HELD=1
 
 # ------------------------------------------------------------------------------- steps
 

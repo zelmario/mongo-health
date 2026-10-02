@@ -384,3 +384,35 @@ def test_files_older_than_the_last_analysis_are_read_from_the_start():
     recent = SeenFile("n0", "metrics.2026-10-02T06-00-00Z-00000", 10, "2026-10-02T19:00:00+00:00")
     assert analyze.backfilled([late, recent], "2026-10-02T18:40:00+00:00")
     assert not analyze.backfilled([recent], "2026-10-02T18:40:00+00:00")
+
+
+def test_an_analysis_run_by_hand_waits_for_the_round(tmp_path, monkeypatch):
+    """A --redo started between two rounds overwrote the state a round saved in the middle."""
+    import fcntl
+    lock = tmp_path / ".run.lock"
+    monkeypatch.setenv("LOCK", str(lock))
+    monkeypatch.delenv("ROUND_LOCK_HELD", raising=False)
+    with open(lock, "a") as round_holds:
+        fcntl.flock(round_holds, fcntl.LOCK_EX)
+        with open(lock, "a") as probe:
+            # While the round holds it, the analysis could not have it either.
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+            except BlockingIOError:
+                got = False
+        assert not got
+    with analyze.round_lock():
+        with open(lock, "a") as probe:
+            try:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                free = True
+            except BlockingIOError:
+                free = False
+    assert not free, "held for the whole analysis"
+
+
+def test_inside_a_round_the_analysis_does_not_wait_for_its_own_parent(monkeypatch):
+    monkeypatch.setenv("ROUND_LOCK_HELD", "1")
+    with analyze.round_lock():
+        pass
