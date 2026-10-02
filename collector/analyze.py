@@ -31,7 +31,7 @@ import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import anomaly
@@ -39,7 +39,7 @@ import runway
 import sizing
 from capture import record_usage
 from config import ConfigError, load_clusters
-from state import State, now
+from state import State, now, timestamp_of
 
 ANALYZING = "analyzing.json"
 PROGRESS = "analyzing.progress.json"  # written by the engine as it decodes
@@ -173,6 +173,20 @@ def append(path: Path, rows: list[dict]) -> None:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
 
 
+def backfilled(pending, last_analysis: str) -> bool:
+    """Whether any file waiting for analysis was opened before the window the engine re-reads.
+
+    The engine re-reads raw FTDC from a day before `last_analysis` (see run_engine); anything
+    older it takes from the daily summaries, which a file that arrived late is not in.
+    """
+    try:
+        cutoff = datetime.fromisoformat(last_analysis.replace("Z", "+00:00")) - timedelta(days=1)
+    except ValueError:
+        return False
+    opened = [timestamp_of(f.name) for f in pending]
+    return any(t is not None and t < cutoff for t in opened)
+
+
 def days_of_raw_ftdc(nodes: list[dict]) -> float:
     """How far back the raw FTDC on disk goes, oldest sample to newest.
 
@@ -245,6 +259,11 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
     # per-day summaries in `daily/`. What bounds the noise is `--since`, which drops findings
     # that already closed before the last run.
     since = None if redo else state.last_analysis
+    if since and backfilled(pending, since):
+        # Files older than the last analysis arrived after it: a first Atlas capture comes
+        # newest first, window by window. Read from `since`, the engine took them as already
+        # summarised and judged Cluster1 on 43 hours of its 20 days. Read from the start.
+        since = None
     out = run_engine(ftdc, since, daily=base / "daily", progress=base / PROGRESS)
 
     stamp = now()

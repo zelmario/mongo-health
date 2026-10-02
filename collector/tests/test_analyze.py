@@ -364,3 +364,13 @@ def test_a_routine_run_leaves_held_charts_alone(tmp_path, monkeypatch):
     analyze_cluster(spec, tmp_path / "data", verbose=False)
     held = [json.loads(line) for line in (tmp_path / "data/prod/findings.jsonl").read_text().splitlines()]
     assert held[0]["chart"] == {"v": [1.0]}
+
+
+def test_files_older_than_the_last_analysis_are_read_from_the_start():
+    """A first Atlas capture comes newest first. The older days arrived after the first
+    analysis, and the next one, reading from a day before it, judged 43 hours of 20 days."""
+    from state import SeenFile
+    late = SeenFile("n0", "metrics.2026-09-12T18-14-46Z-00000", 10, "2026-10-02T19:00:00+00:00")
+    recent = SeenFile("n0", "metrics.2026-10-02T06-00-00Z-00000", 10, "2026-10-02T19:00:00+00:00")
+    assert analyze.backfilled([late, recent], "2026-10-02T18:40:00+00:00")
+    assert not analyze.backfilled([recent], "2026-10-02T18:40:00+00:00")
