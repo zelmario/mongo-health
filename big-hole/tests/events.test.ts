@@ -15,6 +15,8 @@ import {
   electionFindings,
   gapFindings,
   peerFindings,
+  restartFindings,
+  versionFindings,
   type NodeEvents,
 } from '../src/insights/events.js';
 
@@ -367,5 +369,60 @@ describe('peerFindings, on a metric that needs a denominator', () => {
       percentiles: [{ metric: DIRTY, p50: dirtyMb * MB, p95: 0, max: 0 }],
     });
     expect(peerFindings([bare('db1', 20), bare('db2', 21), bare('db3', 300)])).toEqual([]);
+  });
+});
+
+/* ---------------------------------------------------------- restarts and versions ---- */
+
+const MIN = 60_000;
+
+describe('restartFindings', () => {
+  // Cluster1 on 28 Sep 2026: three members, about 4.6 minutes each, ten minutes apart.
+  const rolling = [
+    node({ node: 'a', hostname: 'a', restarts: [{ fromMs: T0, atMs: T0 + 4.6 * MIN }] }),
+    node({ node: 'b', hostname: 'b', restarts: [{ fromMs: T0 + 11 * MIN, atMs: T0 + 15.6 * MIN }] }),
+    node({ node: 'c', hostname: 'c', restarts: [{ fromMs: T0 + 20 * MIN, atMs: T0 + 24.7 * MIN }] }),
+  ];
+
+  it('names members restarting one after another as one rolling restart', () => {
+    const out = restartFindings(rolling);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.ruleId).toBe('rolling-restart');
+    expect(out[0]!.title).toBe('Rolling restart: 3 members, one at a time');
+    expect(out[0]!.firstMs).toBe(T0);
+    expect(out[0]!.lastMs).toBe(T0 + 24.7 * MIN);
+    expect(out[0]!.what).toContain('4.6 to 4.7 minutes');
+  });
+
+  it('keeps a lone restart as a restart of that member', () => {
+    const out = restartFindings([rolling[0]!]);
+    expect(out.map((f) => f.ruleId)).toEqual(['member-restarted']);
+  });
+
+  it('does not chain restarts hours apart', () => {
+    const later = node({ node: 'b', hostname: 'b',
+                         restarts: [{ fromMs: T0 + 300 * MIN, atMs: T0 + 304 * MIN }] });
+    expect(restartFindings([rolling[0]!, later]).map((f) => f.ruleId))
+      .toEqual(['member-restarted', 'member-restarted']);
+  });
+
+  it('does not call the same member restarting twice a rolling restart', () => {
+    const twice = node({ restarts: [{ fromMs: T0, atMs: T0 + MIN },
+                                    { fromMs: T0 + 5 * MIN, atMs: T0 + 6 * MIN }] });
+    expect(restartFindings([twice]).map((f) => f.ruleId))
+      .toEqual(['member-restarted', 'member-restarted']);
+  });
+});
+
+describe('versionFindings', () => {
+  it('puts an upgrade on the timeline as a change', () => {
+    const out = versionFindings([node({ versions: [{ atMs: T0, from: '8.0.32', to: '8.0.34' }] })]);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.ruleId).toBe('setting-changed');
+    expect(out[0]!.what).toBe('This member went from MongoDB 8.0.32 to 8.0.34.');
+  });
+
+  it('says nothing when the version held', () => {
+    expect(versionFindings([node()])).toEqual([]);
   });
 });

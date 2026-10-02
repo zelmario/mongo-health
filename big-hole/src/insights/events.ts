@@ -23,6 +23,10 @@ export interface NodeEvents {
   alarms: Array<{ path: string; atMs: number; by: number }>;
   /** Settings that stepped. Optional: a summary written before this existed simply has none. */
   changes?: Array<{ path: string; atMs: number; from: number; to: number }>;
+  /** When mongod started again (uptime went down), and the last sample before. Optional too. */
+  restarts?: Array<{ fromMs: number; atMs: number }>;
+  /** Version changes between files, from their metadata. Optional too. */
+  versions?: Array<{ atMs: number; from: string; to: string }>;
   /** Per-metric percentiles for the analysed window, used to compare members against peers. */
   percentiles?: Array<{ metric: string; p50: number; p95: number; max: number }>;
   fromMs?: number;
@@ -641,4 +645,133 @@ function formatValue(path: string, v: number, relative = false): string {
   }
   if (path.includes('bytes')) return formatBytes(v);
   return String(Math.round(v));
+}
+
+/**
+ * A MongoDB upgrade or downgrade, as a change on the timeline.
+ *
+ * Read from the metadata at the top of each FTDC file, not from a metric: the version is a
+ * string. Measured on a real Atlas M10, which Atlas moved from 8.0.32 to 8.0.34 on
+ * 30 Sep 2026, one member a minute, and which the report said nothing about. An upgrade is the
+ * first thing to rule in or out when behaviour changes, so it sits beside the incidents as
+ * `setting-changed` does, and claims no cause.
+ */
+export function versionFindings(nodeSummaries: NodeEvents[]): Finding[] {
+  const out: Finding[] = [];
+  for (const node of nodeSummaries) {
+    const label = node.hostname ?? node.node;
+    for (const v of node.versions ?? []) {
+      out.push({
+        captureId: label,
+        captureLabel: label,
+        ruleId: 'setting-changed',
+        title: 'MongoDB version changed',
+        severity: 'info',
+        metric: '(FTDC metadata: version)',
+        unit: 'count',
+        episodes: 1,
+        firstMs: v.atMs,
+        lastMs: v.atMs,
+        worstFromMs: v.atMs,
+        worstToMs: v.atMs,
+        totalMs: 0,
+        peak: 0,
+        what: `This member went from MongoDB ${v.from} to ${v.to}.`,
+        check:
+          'Line this up with when the behaviour changed. On Atlas an upgrade is applied by ' +
+          'Atlas, one member at a time; the release notes of the new version say what changed.',
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Restarts, and the rolling restart they add up to when members go one after another.
+ *
+ * On a real Atlas M10, 28 Sep 2026: each member stopped writing metrics for about 4.6 minutes,
+ * ten minutes apart, came back with its uptime reset, and the set held two elections. The
+ * report showed that as seven separate signals -- members not answering, nodes not reporting,
+ * elections -- and never said the one thing that explains them all: the members were restarted
+ * one at a time. That is what maintenance, a patch or an upgrade looks like, and naming it is
+ * what lets a reader stop worrying about the symptoms or start asking who restarted them.
+ *
+ * Detected from uptime, not from gaps or new FTDC files: mongod also opens a new file when the
+ * last one fills up, and a gap can be a frozen host that never restarted.
+ */
+export function restartFindings(nodeSummaries: NodeEvents[]): Finding[] {
+  // The next member counts as part of the same rolling restart when it starts going down within
+  // this of the previous one coming back. Atlas left about five minutes between members.
+  const NEXT_WITHIN_MS = 30 * 60_000;
+
+  const all: Array<{ label: string; fromMs: number; atMs: number }> = [];
+  for (const node of nodeSummaries) {
+    const label = node.hostname ?? node.node;
+    for (const r of node.restarts ?? []) all.push({ label, ...r });
+  }
+  all.sort((a, b) => a.fromMs - b.fromMs);
+
+  const runs: Array<typeof all> = [];
+  for (const r of all) {
+    const run = runs[runs.length - 1];
+    const last = run?.[run.length - 1];
+    if (run !== undefined && last !== undefined && !run.some((x) => x.label === r.label) &&
+        r.fromMs >= last.atMs - 60_000 && r.fromMs - last.atMs <= NEXT_WITHIN_MS) {
+      run.push(r);
+    } else {
+      runs.push([r]);
+    }
+  }
+
+  const minutes = (ms: number) => (ms / 60_000).toFixed(1);
+  const out: Finding[] = [];
+  for (const run of runs) {
+    const first = run[0]!;
+    const last = run[run.length - 1]!;
+    const down = run.map((r) => r.atMs - r.fromMs);
+    const longest = Math.max(...down);
+    const base = {
+      captureId: first.label,
+      captureLabel: first.label,
+      severity: 'info' as Finding['severity'],
+      metric: 'serverStatus.uptime',
+      unit: 'seconds' as Finding['unit'],
+      firstMs: first.fromMs,
+      lastMs: last.atMs,
+      worstFromMs: first.fromMs,
+      worstToMs: last.atMs,
+      totalMs: down.reduce((a, b) => a + b, 0),
+      peak: Math.round(longest / 1000),
+    };
+    if (run.length >= 2) {
+      const range = Math.min(...down) === longest ? `${minutes(longest)} minutes`
+        : `${minutes(Math.min(...down))} to ${minutes(longest)} minutes`;
+      out.push({
+        ...base,
+        ruleId: 'rolling-restart',
+        title: `Rolling restart: ${run.length} members, one at a time`,
+        episodes: run.length,
+        what:
+          `${run.length} members restarted one after another, each without metrics for ` +
+          `${range}. The members not answering, the nodes not reporting and the elections in ` +
+          'the same window are what a rolling restart looks like from the inside.',
+        check:
+          'Whether somebody planned it: on Atlas, the project activity feed shows maintenance, ' +
+          'patching and upgrades. If nobody did, each member restarting on its own is the thing ' +
+          'to explain, and its mongod log says why it stopped.',
+      });
+    } else {
+      out.push({
+        ...base,
+        ruleId: 'member-restarted',
+        title: 'Member restarted',
+        episodes: 1,
+        what: `mongod started again after ${minutes(longest)} minutes without metrics.`,
+        check:
+          'Whether the restart was planned. If not, the end of the mongod log before it, and ' +
+          'the host\'s own log, say why the process stopped.',
+      });
+    }
+  }
+  return out;
 }

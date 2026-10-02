@@ -145,6 +145,21 @@ DETECTORS = [
      "check": "One around a maintenance window is expected; several without one mean members "
               "are losing contact.",
      "source": "big-hole/src/insights/events.ts · electionFindings"},
+    {"id": "rolling-restart", "area": "events", "severity": "info",
+     "title": "Rolling restart",
+     "what": "Members restarted one after another. What maintenance, a patch or an upgrade looks "
+             "like, and the explanation for the heartbeat, outage and election alerts around it.",
+     "how": "serverStatus.uptime went down on two or more members, each starting within 30 "
+            "minutes of the previous one coming back.",
+     "check": "Whether somebody planned it: on Atlas, the project activity feed.",
+     "source": "big-hole/src/insights/events.ts · restartFindings"},
+    {"id": "member-restarted", "area": "events", "severity": "info",
+     "title": "Member restarted",
+     "what": "mongod started again on one member.",
+     "how": "serverStatus.uptime went down. A new FTDC file alone is not counted: mongod also "
+            "opens one when the last fills up.",
+     "check": "Whether it was planned; if not, the end of the mongod log before it.",
+     "source": "big-hole/src/insights/events.ts · restartFindings"},
     {"id": "alarm", "area": "events", "severity": "critical",
      "title": "An alarm counter moved",
      "what": "Counters that should never move on a healthy server — each one is an event that "
@@ -154,7 +169,7 @@ DETECTORS = [
      "source": "big-hole/src/insights/events.ts · alarmFindings", "list": "alarms"},
     {"id": "setting-changed", "area": "events", "severity": "info",
      "title": "Something changed on the cluster",
-     "what": "A resize or a membership change — shown on the timeline next to what happened "
+     "what": "A resize, a membership change or a new MongoDB version — shown on the timeline next to what happened "
              "after it, so the two can be read together. It never claims a cause.",
      "how": "A change in one of the settings listed below. Shown as context before incidents "
             "within 72 hours.",

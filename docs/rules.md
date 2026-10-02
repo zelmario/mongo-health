@@ -2,7 +2,7 @@
 
 Every check mongo-health runs, what it looks at, when it speaks and why at that threshold. Generated from the code by `collector/catalog.py`; the threshold rules come from `big-hole/src/insights/rules.ts`, reasoning included.
 
-38 threshold rules, 9 detectors and 13 configuration checks.
+38 threshold rules, 11 detectors and 13 configuration checks.
 
 ## Concurrency and queues
 
@@ -606,6 +606,22 @@ Writes stop for the length of an election, so each one is a window in which the 
 
 **What to check.** One around a maintenance window is expected; several without one mean members are losing contact.
 
+### Rolling restart — `rolling-restart`
+
+**Severity:** info · **Speaks when:** serverStatus.uptime went down on two or more members, each starting within 30 minutes of the previous one coming back.
+
+Members restarted one after another. What maintenance, a patch or an upgrade looks like, and the explanation for the heartbeat, outage and election alerts around it.
+
+**What to check.** Whether somebody planned it: on Atlas, the project activity feed.
+
+### Member restarted — `member-restarted`
+
+**Severity:** info · **Speaks when:** serverStatus.uptime went down. A new FTDC file alone is not counted: mongod also opens one when the last fills up.
+
+mongod started again on one member.
+
+**What to check.** Whether it was planned; if not, the end of the mongod log before it.
+
 ### An alarm counter moved — `alarm`
 
 **Severity:** critical · **Speaks when:** Any increase of one of the counters listed below.
@@ -625,7 +641,7 @@ Counters that should never move on a healthy server — each one is an event tha
 
 **Severity:** info · **Speaks when:** A change in one of the settings listed below. Shown as context before incidents within 72 hours.
 
-A resize or a membership change — shown on the timeline next to what happened after it, so the two can be read together. It never claims a cause.
+A resize, a membership change or a new MongoDB version — shown on the timeline next to what happened after it, so the two can be read together. It never claims a cause.
 
 - The host was resized — `systemMetrics.memory.MemTotal_kb`
 - The core count changed — `systemMetrics.cpu.num_logical_cores`

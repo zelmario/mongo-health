@@ -41,7 +41,8 @@ def test_every_rule_that_can_fire_has_an_entry():
     engine = {r["id"] for r in catalog.load()["rules"]}
     produced_elsewhere = {"ftdc-long-outage", "ftdc-micro-stalls", "election-held",
                           "setting-changed", "peer-outlier", "baseline-excursion",
-                          "capacity-runway", "oversized-cluster"}
+                          "capacity-runway", "oversized-cluster", "rolling-restart",
+                          "member-restarted"}
     assert engine | produced_elsewhere <= ids
     assert catalog.anchor("alarm:serverStatus.metrics.repl.initialSync.failedAttempts") in ids
 

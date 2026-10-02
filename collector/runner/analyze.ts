@@ -41,7 +41,7 @@ import { detectRolePrefixes, expandMetric } from '../src/dashboard/layout.js';
 import { detect, type DetectCapture, type Finding } from '../src/insights/detect.js';
 import { RULES } from '../src/insights/rules.js';
 import { ALARM_COUNTERS, WATCHED_SETTINGS, alarmFindings, changeFindings,
-         electionFindings, gapFindings, peerFindings }
+         electionFindings, gapFindings, peerFindings, restartFindings, versionFindings }
   from '../src/insights/events.js';
 import type { SeriesQuery } from '../src/data/reader.js';
 import { parseExpr, unitOf, unitOfPath } from '../src/data/expr.js';
@@ -529,6 +529,14 @@ function fromQuantiles(canonical: string, resolved: string, q: Quantiles): Summa
   };
 }
 
+/** When mongod opened an FTDC file, from its name: `metrics.2026-09-30T18-21-49Z-00000`. */
+function fileOpenedMs(file: string): number | undefined {
+  const m = /metrics\.(\d{4}-\d{2}-\d{2})T(\d{2})-(\d{2})-(\d{2})Z/.exec(file);
+  if (!m) return undefined;
+  const t = Date.parse(`${m[1]}T${m[2]}:${m[3]}:${m[4]}Z`);
+  return Number.isFinite(t) ? t : undefined;
+}
+
 /* ----------------------------------------------------------------------- loading ---- */
 
 interface NodeSummary {
@@ -558,6 +566,10 @@ interface NodeSummary {
   elections: Array<{ atMs: number; term: number }>;
   /** Settings that moved and stayed moved: a resize, a new cache size, a changed pool. */
   changes: Array<{ path: string; atMs: number; from: number; to: number }>;
+  /** Every time mongod started again: `serverStatus.uptime` went down. */
+  restarts: Array<{ fromMs: number; atMs: number }>;
+  /** The MongoDB version changing between two files, from the metadata at the top of each. */
+  versions: Array<{ atMs: number; from: string; to: string }>;
   /** Increments seen on the alarm counters, keyed by path. Empty on a healthy node. */
   alarms: Array<{ path: string; atMs: number; by: number }>;
   percentiles: Summary[];
@@ -903,6 +915,11 @@ try {
     let mongoVersion: string | undefined;
     let dbPath: string | undefined;
     let config: NodeConfig | undefined;
+    // The version of each file in turn, to see an upgrade: Atlas moved Cluster1 from 8.0.32 to
+    // 8.0.34 on 30 Sep 2026 and nothing said so, because only the first file's was kept.
+    const versions: Array<{ atMs: number; from: string; to: string }> = [];
+    let lastVersion: string | undefined =
+      decodeFrom > 0 && nodeDaily !== undefined ? readDays(nodeDaily).at(-1)?.version : undefined;
 
     for (const file of files) {
       const bytes = new Uint8Array(readFileSync(file));
@@ -913,6 +930,16 @@ try {
         meta = readMetadata(bytes);
       } catch {
         /* no metadata in this file */
+      }
+      if (meta?.version) {
+        const opened = fileOpenedMs(file);
+        if (lastVersion !== undefined && meta.version !== lastVersion && opened !== undefined) {
+          versions.push({ atMs: opened, from: lastVersion, to: meta.version });
+        }
+        lastVersion = meta.version;
+        // The newest file's, unlike the hostname: the version a member runs now is the one the
+        // end-of-life recommendation has to judge.
+        mongoVersion = meta.version;
       }
       if (meta?.doc) {
         try {
@@ -926,7 +953,7 @@ try {
         try {
           const meta = readMetadata(bytes);
           hostname = meta?.hostname;
-          mongoVersion = meta?.version;
+          mongoVersion ??= meta?.version;
           dbPath = (meta?.doc as any)?.getCmdLineOpts?.parsed?.storage?.dbPath ?? dbPath;
         } catch {
           /* a file without metadata is not a problem: it comes in the next one */
@@ -1105,6 +1132,27 @@ try {
       // Standalone mongod, or a release that does not report it. Neither is an error.
     }
 
+    // Restarts: uptime only ever climbs while mongod runs, so a drop is a new process. A new
+    // FTDC file is not evidence of one, since mongod also rotates files when they fill up.
+    // Same window as the elections, for the same reason.
+    const restarts: Array<{ fromMs: number; atMs: number }> = [];
+    try {
+      const up = await reader.getSeries('serverStatus.uptime', {} as SeriesQuery);
+      let previous = NaN;
+      let previousT = NaN;
+      for (let k = 0; k < up.mean.length; k++) {
+        const value = up.mean[k]!;
+        if (!Number.isFinite(value)) continue;
+        if (Number.isFinite(previous) && value < previous - 1 && up.t[k]! >= electionsFrom) {
+          restarts.push({ fromMs: Math.round(previousT), atMs: Math.round(up.t[k]!) });
+        }
+        previous = value;
+        previousT = up.t[k]!;
+      }
+    } catch {
+      // A release that does not report it.
+    }
+
     // The alarm counters. One series each, and they are almost always a flat zero -- which is
     // the point: the read is cheap and the answer is usually "nothing to say".
     const alarms: Array<{ path: string; atMs: number; by: number }> = [];
@@ -1254,6 +1302,8 @@ try {
       ...extent,
       cadenceMs: manifest.cadenceMs,
       changes,
+      restarts,
+      versions,
       gaps,
       ...(gapsHeld !== undefined ? { gapsHeld } : {}),
       elections,
@@ -1333,6 +1383,7 @@ try {
   ];
   const findings = [...fromRules, ...gapFindings(nodeSummaries), ...electionFindings(nodeSummaries),
                     ...alarmFindings(nodeSummaries), ...changeFindings(nodeSummaries),
+                    ...versionFindings(nodeSummaries), ...restartFindings(nodeSummaries),
                     ...peerFindings(nodeSummaries)];
 
   // A finding whose whole window predates the mark was already reported on an earlier run.

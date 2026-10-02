@@ -170,6 +170,7 @@ def subject_for(cluster_id: str, incidents: list) -> str:
 # minutes of each other, and a reader wants those on one card rather than scattered across a
 # list sorted by severity.
 SAME_MOMENT_MS = 15 * 60_000
+ROLLING = "rolling-restart"
 
 
 @dataclass
@@ -246,9 +247,22 @@ def moments(groups: list[Group]) -> list[Moment]:
             out.append(placed)
         placed.groups.append(g)
 
+    # A rolling restart explains everything that happened while it ran: members not answering,
+    # nodes not reporting, elections. Started by start time, Cluster1's 25-minute restart came out
+    # as two moments ten minutes apart, so the moments that began inside it join it.
+    for m in [m for m in out if any(g.rule == ROLLING for g in m.groups)]:
+        restart = next(g for g in m.groups if g.rule == ROLLING)
+        for other in [o for o in out if o is not m and o.groups
+                      and restart.from_ms <= o.from_ms <= restart.to_ms]:
+            m.groups.extend(other.groups)
+            other.groups = []
+    out = [m for m in out if m.groups]
+
     # Inside a moment, worst first: that is what the headline names and what a reader should
-    # see before the symptoms that came with it.
+    # see before the symptoms that came with it. A rolling restart goes before them all, since
+    # it is what they are symptoms of.
     for m in out:
-        m.groups.sort(key=lambda g: (order.get(g.severity, 3), -g.seconds_in_state))
+        m.groups.sort(key=lambda g: (g.rule != ROLLING, order.get(g.severity, 3),
+                                     -g.seconds_in_state))
 
     return sorted(out, key=lambda m: (order.get(m.severity, 3), -m.to_ms))

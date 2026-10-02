@@ -268,3 +268,20 @@ def test_the_node_list_is_ordered():
     a = group([finding(rule="memory-low", node="n2"), finding(rule="memory-low", node="n0")])[0]
     b = group([finding(rule="memory-low", node="n0"), finding(rule="memory-low", node="n2")])[0]
     assert a.nodes == b.nodes
+
+
+def test_a_rolling_restart_heads_the_moment_and_takes_in_what_it_caused():
+    """Cluster1, 28 Sep 2026: one 25-minute rolling restart came out as two moments, each led
+    by a critical "member not answering", and never said it was a restart."""
+    MIN = 60_000
+    restart = finding("rolling-restart", "a", T0, T0 + 25 * MIN, severity="info")
+    early = finding("member-unhealthy", "c", T0 + MIN, T0 + 4 * MIN, severity="critical")
+    late = finding("member-unhealthy", "a", T0 + 21 * MIN, T0 + 25 * MIN, severity="critical")
+    elsewhere = finding("checkpoint-slow", "b", T0 + 5 * HOUR, T0 + 6 * HOUR)
+    out = moments(group([restart, early, late, elsewhere]))
+
+    first = next(m for m in out if any(g.rule == "rolling-restart" for g in m.groups))
+    assert first.groups[0].rule == "rolling-restart"
+    assert {g.rule for g in first.groups} == {"rolling-restart", "member-unhealthy"}
+    assert sum(len(g.members) for g in first.groups) == 3
+    assert len(out) == 2, "what happened hours later is still its own moment"
