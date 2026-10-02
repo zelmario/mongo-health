@@ -30,6 +30,17 @@ const EXPRESSIONS: Record<string, string> = {
   'majority lag s': '(replSetGetStatus.optimes.appliedOpTime.ts - replSetGetStatus.optimes.lastCommittedOpTime.ts) / 1000',
   'tcp retrans /s': 'rate(systemMetrics.netstat.Tcp:RetransSegs)',
   'tcp out segs /s': 'rate(systemMetrics.netstat.Tcp:OutSegs)',
+  // Candidates measured on 2 Oct 2026: fields every 8.0 capture carries and no rule reads.
+  'ops killed, client disconnected /s': 'rate(serverStatus.metrics.operation.killedDueToClientDisconnect)',
+  'ops killed, maxTimeMS /s': 'rate(serverStatus.metrics.operation.killedDueToMaxTimeMSExpired)',
+  'ops killed, default maxTimeMS /s': 'rate(serverStatus.metrics.operation.killedDueToDefaultMaxTimeMSExpired)',
+  'cursors timed out /s': 'rate(serverStatus.metrics.cursor.timedOut)',
+  'slow DNS operations /s': 'rate(serverStatus.network.numSlowDNSOperations)',
+  'slow TLS handshakes /s': 'rate(serverStatus.network.numSlowSSLOperations)',
+  'connections rejected /s': 'rate(serverStatus.connections.rejected)',
+  'pages read into cache /s': 'rate(serverStatus.wiredTiger.cache.pages read into cache)',
+  'election timeouts called': 'serverStatus.electionMetrics.electionTimeout.called',
+  'repl buffer apply bytes': 'serverStatus.metrics.repl.buffer.apply.sizeBytes',
 };
 
 function stats(v: Float64Array): string {

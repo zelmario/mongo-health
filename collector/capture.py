@@ -30,6 +30,9 @@ ROSTER = "roster.json"
 # half an hour for the bundle, and without this the page said "Not being watched" all that time
 # about a cluster added a minute before.
 CAPTURING = "capturing.json"
+# The last capture's error, until one succeeds. Before the first capture the page had nothing
+# else to go on and said "Not being watched", after a download Atlas cut three times.
+CAPTURE_FAILED = "capture-failed.json"
 
 
 class CaptureMarker:
@@ -229,9 +232,14 @@ def main() -> int:
 
     failed = 0
     for spec in clusters:
+        base = args.data / spec["cluster_id"]
         try:
             capture_cluster(spec, args.data, verbose=not args.quiet)
+            (base / CAPTURE_FAILED).unlink(missing_ok=True)
         except Exception as e:
+            base.mkdir(parents=True, exist_ok=True)
+            (base / CAPTURE_FAILED).write_text(json.dumps(
+                {"at": now(), "error": f"{type(e).__name__}: {e}"}))
             # One cluster failing must not stop the others. In the MVP the error is loud and
             # not retried: if something breaks I want to hear about it, not have the system
             # paper over it.

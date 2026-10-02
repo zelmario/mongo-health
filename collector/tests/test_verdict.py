@@ -139,3 +139,13 @@ def test_a_first_atlas_capture_is_collecting_not_unwatched():
 
 def test_a_routine_capture_does_not_hide_the_verdict():
     assert evaluate([], NOW, None, True, 20.0, capturing={"stage": "build"}).state == "healthy"
+
+
+def test_a_failed_first_capture_says_so_instead_of_unwatched():
+    """Atlas cut the first download three times; the page said "Not being watched"."""
+    failed = {"error": "ChunkedEncodingError: Response ended prematurely"}
+    v = evaluate([], NOW, None, False, 0.0, capture_failed=failed)
+    assert v.state == "capture_failed" and "Response ended prematurely" in v.reason
+    # A retry under way says that, not the failure before it.
+    v = evaluate([], NOW, None, False, 0.0, capture_failed=failed, capturing={"stage": "download"})
+    assert v.state == "capturing"

@@ -34,6 +34,7 @@ LABELS = {
     "analyzing": "Analyzing FTDC",
     "waiting": "Waiting for the first data",
     "capturing": "Collecting the FTDC",
+    "capture_failed": "Capture failed",
     "failed": "Analysis failed",
     # Uploaded files and nothing more. Never "At risk" or "Healthy": those describe a cluster
     # as it is now, and these describe a capture that ended.
@@ -83,7 +84,7 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
              captured: bool, days_held: float, analysed: bool = True,
              ends: datetime | None = None, analyzing: dict | None = None,
              arriving: dict | None = None, failed: dict | None = None,
-             capturing: dict | None = None) -> Verdict:
+             capturing: dict | None = None, capture_failed: dict | None = None) -> Verdict:
     """The verdict for one cluster.
 
     `silent_hours` is how long data has not been arriving, when that is past what is allowed
@@ -111,6 +112,12 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
         return Verdict("capturing", "Atlas is preparing everything it still holds for this "
                                     "cluster, usually 3 to 10 days of FTDC. The first time this "
                                     "takes up to half an hour.")
+    if not captured and capture_failed:
+        # Before the first capture, the error is the only thing known about the cluster.
+        return Verdict("capture_failed", f"The first capture failed: {capture_failed.get('error')}"
+                                         f". It is tried again on the next round, within the "
+                                         f"hour. On Atlas the bundle already built is kept, so "
+                                         f"only the download is repeated.")
     if not captured:
         if arriving and arriving.get("error"):
             return Verdict("unwatched", f"The collector cannot read this cluster: "

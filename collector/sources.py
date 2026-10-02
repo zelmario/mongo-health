@@ -285,7 +285,10 @@ class AtlasSource:
     # stream with no byte ranges we can rely on, and measured on a real first capture, fetching
     # it again took 90 seconds -- against 25 minutes for Atlas to build a new one at the next
     # run. Seen once in a container, on the first capture: "Response ended prematurely".
-    DOWNLOAD_ATTEMPTS = 3
+    # Then three in a row on 2 Oct 2026, on a 1.24 GB first bundle (20 days of an M10), while a
+    # fourth fetch by hand a minute later completed in 105 s. Atlas sends no length and ignores
+    # Range, so the only remedy is more attempts: five, about two minutes each.
+    DOWNLOAD_ATTEMPTS = 5
     DOWNLOAD_BACKOFF = 10  # seconds, doubled after each failure
 
     def _download(self, job_id: str, target: Path) -> None:

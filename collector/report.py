@@ -1076,7 +1076,7 @@ ol.config .who { font-family: var(--mono); font-size: .8rem; color: var(--ink-fa
 [data-state="unwatched"] { --v: var(--signal); }
 [data-state="analyzing"], [data-state="pending"], [data-state="waiting"],
 [data-state="capturing"] { --v: var(--ink-soft); }
-[data-state="failed"] { --v: var(--bad); }
+[data-state="failed"], [data-state="capture_failed"] { --v: var(--bad); }
 [data-state="files_problems"] { --v: var(--warn); }
 [data-state="files_clean"] { --v: var(--ok); }
 .verdict-label { color: var(--v); font-weight: 700; font-size: 1.125rem; margin-bottom: .25rem; }
@@ -2161,6 +2161,8 @@ def page_index(rows: list[dict], now: datetime) -> str:
             state = "connected, first samples arriving…"
         elif r["verdict"].state == "capturing":
             state = "collecting FTDC…"
+        elif r["verdict"].state == "capture_failed":
+            state = "first capture failed, tried again within the hour"
         elif not r["captured"]:
             state = "configured, nothing captured yet"
         elif r["verdict"].state == "analyzing":
@@ -2288,7 +2290,8 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
                        analysed=bool(summary), ends=ends, analyzing=analyzing(base, now),
                        arriving=None if state.get("last_capture") else arriving(base),
                        failed=read_json(base / "analysis-failed.json"),
-                       capturing=capturing(base, now))
+                       capturing=capturing(base, now),
+                       capture_failed=read_json(base / "capture-failed.json"))
     if verdict.state != "failed" and (stale := read_json(base / "analysis-failed.json")):
         # What is shown is the analysis before. Said, rather than presented as current.
         verdict = Verdict(verdict.state, f"{verdict.reason} The latest analysis failed "
