@@ -280,7 +280,9 @@ def test_a_job_that_outran_the_deadline_is_remembered(monkeypatch, tmp_path):
         capture_cluster(spec, tmp_path, verbose=False)
 
     state = State.load(tmp_path / "c0" / "state.json", "c0")
-    assert state.pending_job == "job7"
+    # A first capture orders a window of the history (AtlasSource.history), so that is what
+    # is remembered.
+    assert state.pending_window[2] == "job7"
     assert state.last_capture is None, "a run that collected nothing did not capture"
 
 
@@ -299,7 +301,9 @@ def test_the_next_run_collects_the_pending_job_instead_of_ordering_another(monke
 
     base = tmp_path / "c0"
     base.mkdir(parents=True)
-    state = State(cluster_id="c0", pending_job="job7")
+    # An hourly run, on a cluster whose history is in: `pending_job` is the hourly bundle.
+    state = State(cluster_id="c0", pending_job="job7", history_done=True)
+    state.record("n0", "metrics.2026-08-07T01-15-12Z-00000", 100)
     state.save(base / "state.json")
 
     spec = {"cluster_id": "c0",
@@ -414,3 +418,96 @@ def test_a_fetch_says_what_it_is_doing_and_clears_it_even_when_it_fails(monkeypa
 
     assert seen["stage"] == "build" and seen["elapsed"] == 42
     assert not (tmp_path / "c0" / "capturing.json").exists()
+
+
+# ------------------------------------------------- the first capture, window by window
+
+def _bundle(path: Path, names: list[str], size: int = 1000) -> None:
+    import io
+    import tarfile as tf
+    with tf.open(path, "w:gz") as t:
+        for name in names:
+            data = b"x" * size
+            info = tf.TarInfo(f"bundle/host-00-00.example.net/27017/diagnostic.data/{name}")
+            info.size = len(data)
+            t.addfile(info, io.BytesIO(data))
+
+
+def _history_source(monkeypatch, oldest: datetime, cut_above: timedelta | None = None):
+    """An AtlasSource whose jobs return one file per day in the window, back to `oldest`."""
+    ordered = []
+    source = AtlasSource("g", "rs", "pub", "priv")
+
+    def create(since, window=None):
+        assert window is not None, "a first capture must never order the whole history"
+        ordered.append(window)
+        return f"job{len(ordered)}"
+
+    def download(job_id, target):
+        start, end = ordered[int(job_id[3:]) - 1]
+        if cut_above is not None and end - start > cut_above:
+            raise sources.requests.exceptions.ChunkedEncodingError("Response ended prematurely")
+        days = []
+        d = end
+        while d > start and d > oldest:
+            days.append(d.strftime("metrics.%Y-%m-%dT%H-%M-%SZ-00000"))
+            d -= timedelta(days=1)
+        _bundle(target, days)
+
+    monkeypatch.setattr(source, "_create_job", create)
+    monkeypatch.setattr(source, "_wait", lambda *a, **kw: None)
+    monkeypatch.setattr(source, "_download", download)
+    return source, ordered
+
+
+def test_the_history_comes_newest_first_and_stops_at_an_empty_window(monkeypatch):
+    """Atlas cuts every download at about two minutes, so a first bundle of 1.24 GB never
+    arrived. The history is asked for in windows instead, until one comes back empty."""
+    now_ = datetime.now(timezone.utc)
+    source, ordered = _history_source(monkeypatch, oldest=now_ - timedelta(days=9))
+    names = [f.name for f in source.history(None)]
+
+    assert len(names) >= 8
+    assert all(later[1] == earlier[0] for earlier, later in zip(ordered, ordered[1:])), \
+        "each window ends where the one after it starts: no gap, newest first"
+    assert ordered[0][1] - ordered[0][0] == AtlasSource.HISTORY_FIRST_WINDOW
+    assert source.history_done
+
+
+def test_a_window_too_big_to_arrive_is_asked_for_again_with_half_the_days(monkeypatch):
+    now_ = datetime.now(timezone.utc)
+    source, ordered = _history_source(monkeypatch, oldest=now_ - timedelta(days=3),
+                                      cut_above=timedelta(days=1))
+    list(source.history(None))
+
+    assert ordered[0][1] - ordered[0][0] == timedelta(days=2)
+    assert ordered[1][1] == ordered[0][1], "the same end, retried"
+    assert ordered[1][1] - ordered[1][0] == timedelta(days=1)
+    assert source.history_done
+
+
+def test_a_first_capture_keeps_its_place_in_the_history(monkeypatch, tmp_path):
+    """Stopped halfway, the next run goes on from the oldest window collected."""
+    now_ = datetime.now(timezone.utc)
+    source, ordered = _history_source(monkeypatch, oldest=now_ - timedelta(days=30))
+    calls = {"n": 0}
+    real = source._wait
+
+    def wait(job_id, *a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 3:
+            raise TimeoutError("still building")
+        return real(job_id, *a, **kw)
+
+    monkeypatch.setattr(source, "_wait", wait)
+    monkeypatch.setattr(sources, "build", lambda spec, **kw: source)
+    spec = {"cluster_id": "c0", "source": {"type": "atlas", "group_id": "g", "replica_set": "rs",
+                                           "public_key": "p", "private_key": "k"}}
+    with pytest.raises(TimeoutError):
+        capture_cluster(spec, tmp_path, verbose=False)
+
+    saved = json.loads((tmp_path / "c0" / "state.json").read_text())
+    assert saved["files"], "the windows collected before the stop are kept"
+    assert saved["history_done"] is False
+    assert saved["history_before"] == ordered[1][0].isoformat()
+    assert saved["pending_window"][2] == "job3", "the window ordered is collected next time"

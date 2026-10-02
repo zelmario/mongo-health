@@ -10,6 +10,7 @@ the poller and the upload form put theirs in a directory the collector then read
 """
 from __future__ import annotations
 
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -149,6 +150,11 @@ class AtlasSource:
         self.job_estimate = job_estimate
         self.job_seconds: float | None = None
         self.on_progress = on_progress or (lambda *a, **kw: None)
+        # The first capture's progress through the history (see `history`), kept in the state.
+        self.history_job: str | None = None
+        self.pending_window: tuple[datetime, datetime] | None = None
+        self.history_before: datetime | None = None
+        self.history_done = False
         # How many files the bundle turned out to hold. The caller stores them one by one and
         # cannot know the total until the tarball is open, which is here.
         self.expected: int | None = None
@@ -200,7 +206,91 @@ class AtlasSource:
             node = node_from_path(path, fallback=path.parent.name)
             yield FTDCFile(node=node, name=path.name, path=path)
 
-    def _create_job(self, since: datetime | None) -> str:
+    # ------------------------------------------------------------- the first capture
+    #
+    # Atlas ends every download at about two minutes, whatever it has sent: measured on
+    # 2 Oct 2026 at 121 s and 906 MB from one machine, 125 s and 754 MB from another, and a
+    # third fetch of the same bundle completed in 105 s. A first bundle holds everything Atlas
+    # keeps -- 1.24 GB for 20 days of an idle M10, and a busy set sits at its cap of several
+    # hundred MB a member -- so at ~6 MB/s it can never arrive. Range is ignored and no length
+    # is sent, so a cut download cannot be resumed either.
+    #
+    # So the first capture asks for the history in windows, newest first, each sized from the
+    # last so it should weigh about HISTORY_WINDOW_BYTES: measured, a 3-day window of the same
+    # M10 built in 267 s, weighed 217 MB and downloaded in 46 s. A window that comes back with
+    # no files is the end of what Atlas holds. Newest first, so the days that matter most land
+    # first, and an interrupted run has already stored the recent ones.
+    HISTORY_WINDOW_BYTES = 300_000_000
+    HISTORY_FIRST_WINDOW = timedelta(days=2)
+    HISTORY_MIN_WINDOW = timedelta(hours=3)
+    HISTORY_MAX_WINDOW = timedelta(days=14)
+    # Past this, stop looking: Atlas keeps days to a few weeks, and a gap this long means the
+    # oldest file is gone, not that the next window would find more.
+    HISTORY_MAX_AGE = timedelta(days=60)
+
+    def history(self, before: datetime | None) -> Iterator[FTDCFile]:
+        """Everything Atlas holds older than `before` (None: older than now), window by window.
+
+        Progress lives on the source for the caller to keep: `history_before` is the start of
+        the oldest window fully collected, `history_done` turns true at the end, and
+        `history_job` with `pending_window` is a window ordered and not yet collected. Its own
+        job id, apart from `pending_job`: the hourly fetch may have one of its own.
+        """
+        now_ = datetime.now(timezone.utc) - timedelta(minutes=1)
+        to = before or now_
+        span = self.HISTORY_FIRST_WINDOW
+        while now_ - to < self.HISTORY_MAX_AGE:
+            if self.history_job and self.pending_window:
+                start, to = self.pending_window
+                job_id = self.history_job
+                try:
+                    self._wait(job_id, self.bootstrap_timeout, measure=False)
+                except (RuntimeError, requests.HTTPError):
+                    self.history_job = self.pending_window = None
+                    continue
+            else:
+                start = to - span
+                self.on_progress("order")
+                job_id = self._create_job(None, window=(start, to))
+                self.history_job, self.pending_window = job_id, (start, to)
+                self._wait(job_id, self.bootstrap_timeout)
+
+            tmp = Path(tempfile.mkdtemp(prefix="ftdc-"))
+            tarball = tmp / "bundle.tar.gz"
+            try:
+                self._download(job_id, tarball)
+            except requests.exceptions.ChunkedEncodingError:
+                shutil.rmtree(tmp, ignore_errors=True)
+                self.history_job = self.pending_window = None
+                if to - start <= self.HISTORY_MIN_WINDOW:
+                    raise
+                # Too big to arrive in time: the same end, half the days.
+                span = (to - start) / 2
+                continue
+            size = tarball.stat().st_size if tarball.exists() else 0
+            self.history_job = self.pending_window = None
+
+            target = tmp / "extracted"
+            with tarfile.open(tarball) as t:
+                extract(t, target)
+            paths = [p for p in sorted(target.rglob("metrics.*")) if p.is_file()]
+            for path in paths:
+                yield FTDCFile(node=node_from_path(path, fallback=path.parent.name),
+                               name=path.name, path=path)
+            shutil.rmtree(tmp, ignore_errors=True)
+            self.history_before = start
+            if not paths:
+                self.history_done = True
+                return
+            # Sized from what this window weighed, per second of history it covered.
+            per_second = size / max((to - start).total_seconds(), 1)
+            span = timedelta(seconds=self.HISTORY_WINDOW_BYTES / max(per_second, 1))
+            span = max(self.HISTORY_MIN_WINDOW, min(self.HISTORY_MAX_WINDOW, span))
+            to = start
+        self.history_done = True
+
+    def _create_job(self, since: datetime | None,
+                    window: tuple[datetime, datetime] | None = None) -> str:
         body = {
             "resourceType": "REPLICASET",
             "resourceName": self.replica_set,
@@ -208,7 +298,11 @@ class AtlasSource:
             "sizeRequestedPerFileBytes": 500_000_000,
             "logTypes": ["FTDC"],
         }
-        if since is not None:
+        stamp = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+        if window is not None:
+            body["logCollectionFromDate"] = stamp(window[0])
+            body["logCollectionToDate"] = stamp(window[1])
+        elif since is not None:
             # The filter matches the timestamp in the file NAME, not the data inside it, so
             # `since` must be the creation time of the oldest file that might still be open --
             # never a wall-clock offset. The caller computes that; a small margin here only

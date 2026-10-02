@@ -90,6 +90,13 @@ class State:
     # there is for telling somebody how much of the wait is left, since the API reports a status
     # and never a percentage. Per cluster, because it scales with how much data it produces.
     last_job_seconds: float | None = None
+    # The first capture of an Atlas cluster, fetched window by window (sources.AtlasSource.
+    # history): the window ordered and not collected yet, the start of the oldest window
+    # collected, and whether the history is complete. A run that stops halfway leaves these, and
+    # the next one goes on from there instead of starting over.
+    pending_window: list[str] | None = None
+    history_before: str | None = None
+    history_done: bool = False
 
     # ------------------------------------------------------------------ persistence
 
@@ -114,6 +121,12 @@ class State:
             source_kind=raw.get("source_kind"),
             pending_job=raw.get("pending_job"),
             last_job_seconds=raw.get("last_job_seconds"),
+            pending_window=raw.get("pending_window"),
+            history_before=raw.get("history_before"),
+            # Absent in every state written before windows existed: a cluster that already
+            # holds files got its history in one bundle and is complete, and one that holds
+            # none has not started.
+            history_done=raw.get("history_done", bool(raw.get("files"))),
         )
 
     def save(self, path: Path) -> None:
@@ -128,6 +141,9 @@ class State:
             "source_kind": self.source_kind,
             "pending_job": self.pending_job,
             "last_job_seconds": self.last_job_seconds,
+            "pending_window": self.pending_window,
+            "history_before": self.history_before,
+            "history_done": self.history_done,
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(body, indent=2, sort_keys=True))

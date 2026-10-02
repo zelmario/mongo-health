@@ -14,15 +14,21 @@ it did. All the analysis lives in `analyze.py`.
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import shutil
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import sources
 from config import ConfigError, files_only, load_clusters
 from state import State, now
+
+
+def parse_time(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
 ROSTER = "roster.json"
@@ -126,6 +132,21 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
     # See State.oldest_open_file: mongod appends to a file for hours, so the data written in
     # the last ten minutes can live in a file named this morning.
     since = state.oldest_open_file()
+    files = source.fetch(since)
+    history = isinstance(source, sources.AtlasSource) and not state.history_done
+    if history:
+        if state.pending_window:
+            start, end, job = state.pending_window
+            source.pending_window = (parse_time(start), parse_time(end))
+            source.history_job = job
+        if not state.files:
+            # Nothing held yet: the history is the whole capture. The hourly fetch with no
+            # date filter asks for everything in one bundle, which Atlas cuts at two minutes.
+            # A job ordered that way by an older version is dropped for the same reason.
+            source.pending_job = None
+            files = iter(())
+        files = itertools.chain(files, source.history(
+            parse_time(state.history_before) if state.history_before else None))
 
     t0 = time.monotonic()
     new = skipped = new_bytes = 0
@@ -135,7 +156,7 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
         print(f"[{cluster_id}] {source.describe()}")
 
     try:
-        for f in source.fetch(since):
+        for f in files:
             size = f.path.stat().st_size
             nodes.add(f.node)
 
@@ -162,6 +183,13 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
         # could not wait out is exactly the thing a failed run has to leave behind. Losing the
         # id here means the next run orders the same bundle again and pays the same wait.
         state.pending_job = getattr(source, "pending_job", None)
+        if history:
+            window = source.pending_window
+            state.pending_window = ([window[0].isoformat(), window[1].isoformat(),
+                                     source.history_job] if window else None)
+            if source.history_before:
+                state.history_before = source.history_before.isoformat()
+            state.history_done = source.history_done
         # Only overwritten when a job actually finished, so a run that timed out keeps the
         # previous cluster's measurement rather than replacing it with a number that describes
         # nothing.
