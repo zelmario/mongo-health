@@ -221,11 +221,12 @@ class State:
         Returns None when nothing is stored yet, which means "do not filter at all".
         """
         candidates: dict[str, datetime] = {}
+        closed = self._closed_when_stored()
         for f in self.files.values():
             when = timestamp_of(f.name)
             if when is None:
                 continue  # the interim carries no timestamp and is always served anyway
-            if f.stable:
+            if f.stable or f.key in closed:
                 continue  # proven complete: it cannot need fetching again
             current = candidates.get(f.node)
             if current is None or when < current:
@@ -245,6 +246,38 @@ class State:
             if current is None or when > current:
                 newest[f.node] = when
         return min(newest.values()) if newest else None
+
+    # Files stored within this of each other came in the same capture: one window of a first
+    # capture lands in seconds, and the hourly ones are an hour apart.
+    SAME_CAPTURE_SECONDS = 600
+
+    def _closed_when_stored(self) -> set[str]:
+        """Files that already had a newer file beside them when they were stored.
+
+        mongod opens a new file only after closing the last, so a file that arrived together
+        with a newer one from the same node was complete when we copied it. Without this, the
+        126 files of Cluster1's first capture, each seen once, held the anchor at 12 Sep, and
+        every hourly capture asked Atlas for the whole history again -- which Atlas cuts.
+        """
+        by_node: dict[str, list[tuple[datetime, datetime, str]]] = {}
+        for f in self.files.values():
+            opened = timestamp_of(f.name)
+            try:
+                stored = datetime.fromisoformat(f.seen_at.replace("Z", "+00:00"))
+            except (AttributeError, ValueError):
+                continue
+            if opened is not None:
+                by_node.setdefault(f.node, []).append((opened, stored, f.key))
+        closed = set()
+        for files in by_node.values():
+            files.sort()
+            earliest_after = None  # the earliest a newer file of this node was stored
+            for opened, stored, key in reversed(files):
+                if earliest_after is not None and \
+                        (earliest_after - stored).total_seconds() <= self.SAME_CAPTURE_SECONDS:
+                    closed.add(key)
+                earliest_after = stored if earliest_after is None else min(earliest_after, stored)
+        return closed
 
     def pending_analysis(self) -> list[SeenFile]:
         return [f for f in self.files.values() if f.analyzed_at is None]

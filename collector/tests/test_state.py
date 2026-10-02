@@ -103,6 +103,7 @@ def test_anchor_does_not_jump_forward_on_rotation():
     for node, name in [("n0", "metrics.2026-08-07T01-10-00Z-00000"),
                        ("n1", "metrics.2026-08-07T01-11-00Z-00000")]:
         s.record(node, name, 8_000_000)          # captured once; not yet proven complete
+        s.files[f"{node}/{name}"].seen_at = "2026-08-07T02:05:00+00:00"   # by an earlier run
     for node, name in [("n0", "metrics.2026-08-07T12-50-00Z-00000"),
                        ("n1", "metrics.2026-08-07T12-51-00Z-00000")]:
         s.record(node, name, 200_000)            # both nodes roll over
@@ -208,3 +209,15 @@ def test_an_old_state_inherits_its_last_arrival_from_its_last_run(tmp_path):
                                 "last_capture": "2026-08-20T10:00:00+00:00", "files": {}}))
 
     assert State.load(path, "prod").last_new_data == "2026-08-20T10:00:00+00:00"
+
+
+def test_files_that_came_with_a_newer_one_were_already_complete():
+    """mongod opens a file only after closing the last. Cluster1's first capture brought 126
+    files at once, each seen once, and the anchor stayed at the oldest: every hourly capture
+    asked Atlas for twenty days again, and Atlas cut every one."""
+    s = fresh()
+    names = [f"metrics.2026-09-{d:02d}T06-00-00Z-00000" for d in (12, 13, 14)]
+    for name in names:
+        s.record("n0", name, 10_000_000)       # one capture, seconds apart
+    anchor = s.oldest_open_file()
+    assert anchor is not None and anchor.day == 14, "only the newest can still be open"
