@@ -1074,7 +1074,8 @@ ol.config .who { font-family: var(--mono); font-size: .8rem; color: var(--ink-fa
 [data-state="attention"] { --v: var(--warn); }
 [data-state="at_risk"] { --v: var(--bad); }
 [data-state="unwatched"] { --v: var(--signal); }
-[data-state="analyzing"], [data-state="pending"], [data-state="waiting"] { --v: var(--ink-soft); }
+[data-state="analyzing"], [data-state="pending"], [data-state="waiting"],
+[data-state="capturing"] { --v: var(--ink-soft); }
 [data-state="failed"] { --v: var(--bad); }
 [data-state="files_problems"] { --v: var(--warn); }
 [data-state="files_clean"] { --v: var(--ok); }
@@ -1254,6 +1255,9 @@ def silent_hours(state: dict, now: datetime, summary: dict | None = None) -> flo
 
 
 ANALYZING_FOR_AT_MOST_HOURS = 6
+# Atlas gets half an hour to build the first bundle (sources.BOOTSTRAP_TIMEOUT) and the download
+# ten minutes; past twice that, the marker is from a run that was killed.
+CAPTURING_FOR_AT_MOST_HOURS = 2
 
 
 def read_json(path: Path) -> dict | None:
@@ -1300,6 +1304,16 @@ def analyzing(base: Path, now: datetime) -> dict | None:
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return None
     return marker if (now - started).total_seconds() < ANALYZING_FOR_AT_MOST_HOURS * 3600 else None
+
+
+def capturing(base: Path, now: datetime) -> dict | None:
+    """What a fetch from this cluster's source is doing, if one is running (capture.py)."""
+    try:
+        marker = json.loads((base / "capturing.json").read_text())
+        started = datetime.fromisoformat(marker["started"].replace("Z", "+00:00"))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return marker if (now - started).total_seconds() < CAPTURING_FOR_AT_MOST_HOURS * 3600 else None
 
 
 def newest_sample(state: dict, summary: dict | None = None) -> datetime | None:
@@ -1526,9 +1540,23 @@ PROGRESS_JS = r"""
   const short = (n) => String(n).split('.')[0].replace(/_\d+$/, '');
   function draw(el, p) {
     const bar = el.querySelector('.use-bar'), meta = el.querySelector('.meta');
+    const mb = (b) => (b / 1048576).toFixed(0) + ' MB';
+    const mins = (s) => s < 90 ? Math.round(s) + ' s' : Math.round(s / 60) + ' min';
     if (p.stage === 'checks') {
       bar.style.setProperty('--w', '100%');
       meta.textContent = 'running the checks…';
+    } else if (p.stage === 'queued') {
+      meta.textContent = 'files received, the analysis starts in a moment…';
+    } else if (p.stage === 'order') {
+      meta.textContent = 'asking Atlas for the FTDC…';
+    } else if (p.stage === 'build') {
+      // Atlas reports a status and no percentage: a fraction only when this cluster has been
+      // timed before (sources.AtlasSource._wait), otherwise just how long it has been.
+      if (p.total) bar.style.setProperty('--w', (100 * p.done / p.total).toFixed(0) + '%');
+      meta.textContent = 'Atlas is preparing the bundle · ' + mins(p.elapsed || 0) + ' so far';
+    } else if (p.stage === 'download') {
+      if (p.total) bar.style.setProperty('--w', (100 * p.done / p.total).toFixed(0) + '%');
+      meta.textContent = 'downloading · ' + mb(p.done) + (p.total ? ' of ' + mb(p.total) : '');
     } else if (p.total) {
       bar.style.setProperty('--w', (100 * p.done / p.total).toFixed(0) + '%');
       meta.textContent = p.done + ' of ' + p.total + ' files' + (p.node ? ' · ' + short(p.node) : '');
@@ -1554,6 +1582,12 @@ PROGRESS_JS = r"""
   tick();
 })();
 """
+
+
+# The states something is running in, which get the progress bar: a first fetch, files waiting
+# for the analysis that follows it, and the analysis itself. One bar across all three, so the page
+# does not go still in the gap between capture and analysis.
+BUSY = ("capturing", "pending", "analyzing")
 
 
 def progress_bar(url: str) -> str:
@@ -1583,7 +1617,7 @@ def verdict_block(v: Verdict, state: dict, incidents: str, progress: str = "") -
     <section class="verdict" data-state="{esc(v.state)}">
       <div class="verdict-label">{esc(v.label)}</div>
       <p>{esc(v.reason)}{link}</p>
-      {progress_bar(progress) if progress and v.state == "analyzing" else ""}
+      {progress_bar(progress) if progress and v.state in BUSY else ""}
       {causes}
     </section>"""
 
@@ -2125,6 +2159,8 @@ def page_index(rows: list[dict], now: datetime) -> str:
     for r in rows:
         if not r["captured"] and r["verdict"].state == "waiting":
             state = "connected, first samples arriving…"
+        elif r["verdict"].state == "capturing":
+            state = "collecting FTDC…"
         elif not r["captured"]:
             state = "configured, nothing captured yet"
         elif r["verdict"].state == "analyzing":
@@ -2152,7 +2188,7 @@ def page_index(rows: list[dict], now: datetime) -> str:
               <span class="verdict-pill" data-state="{esc(v.state)}">{esc(v.label)}</span></div>
             <div class="meta">{esc(v.reason)}</div>
             <div class="meta">{esc(state)}</div>
-            {progress_bar(f"progress/{r['id']}") if v.state == "analyzing" else ""}
+            {progress_bar(f"progress/{r['id']}") if v.state in BUSY else ""}
           </div>
           {badge}
         </div>""")
@@ -2251,7 +2287,8 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
                        float(summary.get("days_of_raw_ftdc") or 0),
                        analysed=bool(summary), ends=ends, analyzing=analyzing(base, now),
                        arriving=None if state.get("last_capture") else arriving(base),
-                       failed=read_json(base / "analysis-failed.json"))
+                       failed=read_json(base / "analysis-failed.json"),
+                       capturing=capturing(base, now))
     if verdict.state != "failed" and (stale := read_json(base / "analysis-failed.json")):
         # What is shown is the analysis before. Said, rather than presented as current.
         verdict = Verdict(verdict.state, f"{verdict.reason} The latest analysis failed "

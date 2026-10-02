@@ -33,6 +33,7 @@ LABELS = {
     "pending": "Not checked yet",
     "analyzing": "Analyzing FTDC",
     "waiting": "Waiting for the first data",
+    "capturing": "Collecting the FTDC",
     "failed": "Analysis failed",
     # Uploaded files and nothing more. Never "At risk" or "Healthy": those describe a cluster
     # as it is now, and these describe a capture that ended.
@@ -81,7 +82,8 @@ def _describe(found: list, now_ms: int, window: str, archive: bool = False) -> s
 def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
              captured: bool, days_held: float, analysed: bool = True,
              ends: datetime | None = None, analyzing: dict | None = None,
-             arriving: dict | None = None, failed: dict | None = None) -> Verdict:
+             arriving: dict | None = None, failed: dict | None = None,
+             capturing: dict | None = None) -> Verdict:
     """The verdict for one cluster.
 
     `silent_hours` is how long data has not been arriving, when that is past what is allowed
@@ -98,7 +100,17 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
     `arriving` is what the poller says about a cluster with nothing captured yet: the members it
     is reading, or the error that stops it. A cluster added a minute ago read "Not being
     watched" until its first capture, while its samples were already coming in.
+
+    `capturing` is what a first fetch is doing (see capture.CaptureMarker). On Atlas that fetch
+    waits up to half an hour for the bundle, and the page called the cluster unwatched all along.
     """
+    if not captured and capturing:
+        if capturing.get("stage") == "download":
+            return Verdict("capturing", "Downloading everything Atlas still holds for this "
+                                        "cluster. The analysis starts when it lands.")
+        return Verdict("capturing", "Atlas is preparing everything it still holds for this "
+                                    "cluster, usually 3 to 10 days of FTDC. The first time this "
+                                    "takes up to half an hour.")
     if not captured:
         if arriving and arriving.get("error"):
             return Verdict("unwatched", f"The collector cannot read this cluster: "

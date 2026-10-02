@@ -576,3 +576,12 @@ def test_every_rule_has_a_name_for_its_chart():
     rules = json.loads((Path(__file__).resolve().parent.parent / "rules.json").read_text())
     missing = [r["id"] for r in rules["rules"] if r["id"] not in report.MEASURES]
     assert missing == []
+
+
+def test_a_capture_marker_from_a_killed_run_is_ignored(tmp_path):
+    now = datetime(2026, 10, 2, 17, 0, tzinfo=timezone.utc)
+    marker = tmp_path / "capturing.json"
+    marker.write_text(json.dumps({"started": "2026-10-02T16:50:00Z", "stage": "build"}))
+    assert report.capturing(tmp_path, now)["stage"] == "build"
+    marker.write_text(json.dumps({"started": "2026-10-02T13:00:00Z", "stage": "build"}))
+    assert report.capturing(tmp_path, now) is None

@@ -26,6 +26,42 @@ from state import State, now
 
 
 ROSTER = "roster.json"
+# Written while a source is fetching, removed when it stops. The first Atlas capture waits up to
+# half an hour for the bundle, and without this the page said "Not being watched" all that time
+# about a cluster added a minute before.
+CAPTURING = "capturing.json"
+
+
+class CaptureMarker:
+    """What a fetch is doing, on disk for the page: ordering, Atlas building, downloading.
+
+    Rewritten when the stage changes, and within a stage at most every two seconds: a download
+    reports every megabyte, and the page asks every two seconds anyway.
+    """
+
+    def __init__(self, base: Path) -> None:
+        self.path = base / CAPTURING
+        self.started = now()
+        self.stage: str | None = None
+        self.written = 0.0
+
+    def __call__(self, stage: str, done: float = 0, total: float = 0, note: str | None = None,
+                 **_) -> None:
+        t = time.monotonic()
+        if stage == self.stage and t - self.written < 2:
+            return
+        self.stage, self.written = stage, t
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(f".{CAPTURING}.tmp")
+        # `note` is the seconds Atlas has been building, the one thing known about that wait.
+        elapsed = float(note) if note and str(note).isdigit() else None
+        tmp.write_text(json.dumps({"started": self.started, "stage": stage, "done": done,
+                                   "total": total, "elapsed": elapsed}))
+        tmp.replace(self.path)
+
+    def clear(self) -> None:
+        self.path.unlink(missing_ok=True)
+
 
 
 def write_roster(data: Path, clusters: list[dict]) -> None:
@@ -68,14 +104,16 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
     ftdc = base / "ftdc"
     state = State.load(base / "state.json", cluster_id)
 
+    marker = None
     if spec["source"].get("type") in ("onprem", "mongodb"):
         # A server of your own: poller.py writes what the members report as FTDC under
         # incoming/, uploaded files are unpacked beside it member by member, and from here on
         # it is a directory like any other.
         source = sources.DirectorySource(base / "incoming")
     else:
+        marker = CaptureMarker(base)
         source = sources.build(spec["source"], pending_job=state.pending_job,
-                               job_estimate=state.last_job_seconds)
+                               job_estimate=state.last_job_seconds, on_progress=marker)
     # Recorded on every run rather than only at creation: a cluster can be moved from one kind
     # of source to another, and `watchdog.py` judges silence against a clock that depends on
     # this — a stale value there would judge it against the wrong one.
@@ -115,6 +153,8 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
                 mark = "~" if f.is_interim else "+"
                 print(f"  {mark} {f.node}/{f.name}  {size/1024:.0f} KB")
     finally:
+        if marker is not None:
+            marker.clear()
         # Written even when the run fails, and this is the point of it: a bundle we ordered and
         # could not wait out is exactly the thing a failed run has to leave behind. Losing the
         # id here means the next run orders the same bundle again and pays the same wait.

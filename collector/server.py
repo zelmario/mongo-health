@@ -1143,12 +1143,23 @@ class Handler(SimpleHTTPRequestHandler):
         import report  # noqa: PLC0415
 
         base = self.app.data / cluster_id
-        body: dict = {"analyzing": report.analyzing(base, self.app.clock()) is not None}
+        now = self.app.clock()
+        body: dict = {"analyzing": report.analyzing(base, now) is not None}
         if body["analyzing"]:
             try:
                 body.update(json.loads((base / "analyzing.progress.json").read_text()))
             except (OSError, ValueError):
                 pass  # started, but the engine has not decoded a file yet
+        elif (fetch := report.capturing(base, now)) is not None:
+            # A first fetch from Atlas: "analyzing" is what the page's script polls on, so the
+            # bar keeps moving through the capture and into the analysis after it.
+            body.update({"analyzing": True, **{k: fetch.get(k) for k in
+                                               ("stage", "done", "total", "elapsed")}})
+        elif (report.read_json(base / "state.json") or {}).get("last_capture") \
+                and not (base / "summary.json").exists() \
+                and not (base / "analysis-failed.json").exists():
+            # Captured, and the analysis has not started: the minute between the two.
+            body.update({"analyzing": True, "stage": "queued"})
         data = json.dumps(body).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -1267,6 +1278,13 @@ def serve(app: App, bind: str, port: int) -> ThreadingHTTPServer:
     return ThreadingHTTPServer((bind, port), handler)
 
 
+def report_stage(marker: Path) -> str:
+    try:
+        return "capturing:" + str(json.loads(marker.read_text()).get("stage"))
+    except (OSError, ValueError, AttributeError):
+        return "capturing"
+
+
 def watch_analyses(app: App, every: float = 5.0) -> None:
     """Rebuild the pages when an analysis starts or ends.
 
@@ -1281,6 +1299,10 @@ def watch_analyses(app: App, every: float = 5.0) -> None:
                 now_.add((p.parent.name, p.stat().st_mtime))
             except OSError:
                 continue  # it finished between the listing and the look
+        # A fetch, by stage and not by time: a download rewrites its marker every two seconds,
+        # and the page only words the stage.
+        for p in app.data.glob("*/capturing.json"):
+            now_.add((p.parent.name, (report_stage(p))))
         if now_ != seen:
             seen = now_
             try:

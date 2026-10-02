@@ -126,3 +126,16 @@ def test_a_failed_first_analysis_says_so_instead_of_promising_one():
                  failed={"error": "RuntimeError: engine failed (1)"})
     assert v.state == "failed" and "engine failed" in v.reason
     assert "updates when" not in v.reason
+
+
+def test_a_first_atlas_capture_is_collecting_not_unwatched():
+    """Added a minute ago, Atlas building the bundle: it read "Not being watched" for the half
+    hour that takes."""
+    v = evaluate([], NOW, None, False, 0.0, capturing={"stage": "build"})
+    assert v.state == "capturing" and "half an hour" in v.reason
+    v = evaluate([], NOW, None, False, 0.0, capturing={"stage": "download"})
+    assert v.state == "capturing" and "Downloading" in v.reason
+
+
+def test_a_routine_capture_does_not_hide_the_verdict():
+    assert evaluate([], NOW, None, True, 20.0, capturing={"stage": "build"}).state == "healthy"

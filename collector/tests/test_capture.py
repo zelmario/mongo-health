@@ -383,3 +383,34 @@ def test_uploaded_files_alone_are_not_on_the_watchdog_roster(tmp_path: Path):
     ])
     listed = {c["cluster_id"] for c in json.loads((tmp_path / "roster.json").read_text())["clusters"]}
     assert listed == {"connected", "atlas"}
+
+
+def test_a_fetch_says_what_it_is_doing_and_clears_it_even_when_it_fails(monkeypatch, tmp_path):
+    """The page reads capturing.json to say "Collecting the FTDC" instead of "Not being
+    watched". Left behind by a failed fetch, it would say collecting for two hours."""
+    seen = {}
+
+    class Failing:
+        pending_job = None
+        job_seconds = None
+
+        def __init__(self, on_progress):
+            self.on_progress = on_progress
+
+        def describe(self):
+            return "atlas:g/rs"
+
+        def fetch(self, since):
+            self.on_progress("build", done=0, total=0, note="42")
+            seen.update(json.loads((tmp_path / "c0" / "capturing.json").read_text()))
+            raise RuntimeError("job failed")
+            yield  # pragma: no cover
+
+    monkeypatch.setattr(sources, "build", lambda spec, on_progress=None, **kw: Failing(on_progress))
+    spec = {"cluster_id": "c0", "source": {"type": "atlas", "group_id": "g", "replica_set": "rs",
+                                           "public_key": "p", "private_key": "k"}}
+    with pytest.raises(RuntimeError):
+        capture_cluster(spec, tmp_path, verbose=False)
+
+    assert seen["stage"] == "build" and seen["elapsed"] == 42
+    assert not (tmp_path / "c0" / "capturing.json").exists()
