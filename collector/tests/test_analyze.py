@@ -351,6 +351,16 @@ def test_a_reanalysis_redraws_the_charts_of_findings_it_already_holds(tmp_path, 
     assert held[0]["detected_at"] == first["detected_at"]
 
 
+def test_a_reanalysis_rewords_the_findings_it_already_holds(tmp_path, monkeypatch):
+    spec = setup(tmp_path)
+    stub_engine(monkeypatch, engine_output(findings=[dict(a_finding(), what="0.1 to 0.1 minutes")]))
+    analyze_cluster(spec, tmp_path / "data", verbose=False)
+    stub_engine(monkeypatch, engine_output(findings=[dict(a_finding(), what="7 seconds")]))
+    analyze_cluster(spec, tmp_path / "data", redo=True, verbose=False)
+    held = [json.loads(line) for line in (tmp_path / "data/prod/findings.jsonl").read_text().splitlines()]
+    assert [h["what"] for h in held] == ["7 seconds"]
+
+
 def test_a_routine_run_leaves_held_charts_alone(tmp_path, monkeypatch):
     spec = setup(tmp_path)
     stub_engine(monkeypatch, engine_output(findings=[dict(a_finding(), chart={"v": [1.0]})]))

@@ -426,3 +426,12 @@ describe('versionFindings', () => {
     expect(versionFindings([node()])).toEqual([]);
   });
 });
+
+describe('restart durations', () => {
+  it('says seconds for a restart of seconds, once when they are all the same', () => {
+    const quick = ['a', 'b', 'c'].map((n, i) => node({
+      node: n, hostname: n, restarts: [{ fromMs: T0 + i * 40_000, atMs: T0 + i * 40_000 + 7_000 }],
+    }));
+    expect(restartFindings(quick)[0]!.what).toContain('each without metrics for 7 seconds.');
+  });
+});

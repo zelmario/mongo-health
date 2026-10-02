@@ -149,3 +149,17 @@ def test_a_failed_first_capture_says_so_instead_of_unwatched():
     # A retry under way says that, not the failure before it.
     v = evaluate([], NOW, None, False, 0.0, capture_failed=failed, capturing={"stage": "download"})
     assert v.state == "capturing"
+
+
+def test_the_verdict_names_the_rolling_restart_the_alerts_came_from():
+    """Cluster1: "member not answering" alone read as an outage; it was Atlas restarting it."""
+    restart = f("r", severity="info", rule="rolling-restart", ended_hours_ago=30)
+    restart["title"] = "Rolling restart: 3 members, one at a time"
+    down = f("d", severity="critical", rule="member-unhealthy", ended_hours_ago=30)
+    v = verdict([restart, down])
+    assert v.state == "attention" and v.reason.startswith("Rolling restart")
+
+
+def test_a_rolling_restart_with_nothing_serious_is_not_a_problem():
+    restart = f("r", severity="info", rule="rolling-restart", ended_hours_ago=30)
+    assert verdict([restart]).state == "healthy"

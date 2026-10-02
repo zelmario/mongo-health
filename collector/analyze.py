@@ -150,15 +150,21 @@ def finding_id(cluster_id: str, f: dict) -> str:
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
+# What a re-analysis brings up to date on a finding already held: how it is drawn and how it
+# is worded. Cluster1's rolling restart said "0.1 to 0.1 minutes" until the wording was fixed,
+# and the fix reached only restarts found after it.
+REFRESHED = ("chart", "title", "what", "check")
+
+
 def refresh_charts(path: Path, charts: dict[str, dict]) -> None:
-    """The chart of findings already held, redrawn by a re-analysis. Nothing else changes --
-    not when it was detected, not whether it was sent -- so a better picture of an old incident
-    never becomes a second email about it. Without this, a finding kept the chart the engine
-    drew the day it was found, and an improvement to the charts reached only new incidents."""
+    """The chart and the wording of findings already held, redone by a re-analysis. Nothing
+    else changes -- not when it was detected, not whether it was sent -- so a better picture of
+    an old incident never becomes a second email about it. Without this, a finding kept the
+    chart the engine drew the day it was found, and an improvement reached only new incidents."""
     rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
     for row in rows:
         if row.get("id") in charts:
-            row["chart"] = charts[row["id"]]
+            row.update(charts[row["id"]])
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
     tmp.replace(path)
@@ -303,8 +309,8 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
               + ahead):
         fid = finding_id(cluster_id, f)
         if fid in already:
-            if redo and f.get("chart"):
-                redrawn[fid] = f["chart"]
+            if redo:
+                redrawn[fid] = {k: f[k] for k in REFRESHED if f.get(k)}
             continue
         fresh.append({
             "id": fid,

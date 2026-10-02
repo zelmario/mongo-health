@@ -89,7 +89,9 @@ class Group:
 # Sizing advice is about the tier, and every member is the same tier.
 # Replication lag is measured across the members, so every node reports the same
 # number for the same event. Naming one of them would blame a witness.
-CLUSTER_WIDE = frozenset({"election-held", "oversized-cluster", "replication-lag"})
+# A rolling restart names its members in its own sentence; the one that went first is not it.
+CLUSTER_WIDE = frozenset({"election-held", "oversized-cluster", "replication-lag",
+                          "rolling-restart"})
 
 
 def group(findings: list[dict]) -> list[Group]:

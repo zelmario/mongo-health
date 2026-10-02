@@ -723,7 +723,10 @@ export function restartFindings(nodeSummaries: NodeEvents[]): Finding[] {
     }
   }
 
-  const minutes = (ms: number) => (ms / 60_000).toFixed(1);
+  // Seconds under a minute and a half: Atlas's upgrade of the same cluster took each member
+  // down for about seven, which read "0.1 to 0.1 minutes".
+  const span = (ms: number) =>
+    ms < 90_000 ? `${Math.round(ms / 1000)} seconds` : `${(ms / 60_000).toFixed(1)} minutes`;
   const out: Finding[] = [];
   for (const run of runs) {
     const first = run[0]!;
@@ -744,8 +747,11 @@ export function restartFindings(nodeSummaries: NodeEvents[]): Finding[] {
       peak: Math.round(longest / 1000),
     };
     if (run.length >= 2) {
-      const range = Math.min(...down) === longest ? `${minutes(longest)} minutes`
-        : `${minutes(Math.min(...down))} to ${minutes(longest)} minutes`;
+      const low = span(Math.min(...down));
+      const high = span(longest);
+      const range = low === high ? high
+        : low.split(' ')[1] === high.split(' ')[1]
+          ? `${low.split(' ')[0]} to ${high}` : `${low} to ${high}`;
       out.push({
         ...base,
         ruleId: 'rolling-restart',
@@ -766,7 +772,7 @@ export function restartFindings(nodeSummaries: NodeEvents[]): Finding[] {
         ruleId: 'member-restarted',
         title: 'Member restarted',
         episodes: 1,
-        what: `mongod started again after ${minutes(longest)} minutes without metrics.`,
+        what: `mongod started again after ${span(longest)} without metrics.`,
         check:
           'Whether the restart was planned. If not, the end of the mongod log before it, and ' +
           'the host\'s own log, say why the process stopped.',

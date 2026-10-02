@@ -154,8 +154,14 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
 
     now_ms = int(now.timestamp() * 1000)
     serious = [f for f in findings if f.get("severity") in ("critical", "warning")]
-    recent = moments(group_findings(
-        [f for f in serious if int(f["toMs"]) >= now_ms - ATTENTION_DAYS * 24 * HOUR_MS]))
+    # A rolling restart is information on its own, but when it is what the serious signals
+    # came from, it is what the verdict should name first: "members not answering" on Cluster1
+    # was the restart Atlas did, and said alone it read as an outage.
+    restarts = [f for f in findings if f.get("rule") == "rolling-restart"]
+    recent = [m for m in moments(group_findings(
+        [f for f in serious + restarts
+         if int(f["toMs"]) >= now_ms - ATTENTION_DAYS * 24 * HOUR_MS]))
+        if any(g.severity in ("critical", "warning") for g in m.groups)]
 
     def order(m):
         # Critical first, then the most recent: the thing to read first is the worst thing that
