@@ -195,6 +195,26 @@ def seconds_out_loud(seconds) -> str:
     return f"{seconds / 3600:.1f} h"
 
 
+def targeting_reading(typical: float, busy: float) -> str:
+    """What the documents-read-per-returned row says, from its typical and its busy ratio.
+
+    It used to say "queries are using indexes" for anything under 100 : 1, so a cluster at
+    35 : 1 typical and 181 : 1 busy was called well indexed in the line next to the numbers
+    that said otherwise. 100 is where query-targeting-poor speaks; 10 is the edge of "close to
+    one".
+    """
+    if typical >= 100:
+        return ("Reading this many documents to answer each one is the signature of a query "
+                "with no usable index.")
+    if busy >= 100:
+        return (f"Usually {typical:.0f} : 1, but {busy:.0f} : 1 at busy moments: some of the "
+                f"heavier queries have no usable index.")
+    if typical >= 10:
+        return (f"About {typical:.0f} documents read for each one returned. Indexes are used, "
+                f"but not selective enough for some queries.")
+    return "Close to one document read per document returned: queries are using indexes."
+
+
 def build_profile(baseline: list[dict]) -> list[dict]:
     """The handful of numbers a DBA would actually ask for, in plain language.
 
@@ -288,6 +308,7 @@ def build_profile(baseline: list[dict]) -> list[dict]:
     returned = pick(baseline, "rate(serverStatus.metrics.document.returned)", node)
     if scanned and returned and returned["p50"] > 0:
         ratio = scanned["p50"] / returned["p50"]
+        busy = scanned["p95"] / max(returned["p95"], 1)
         rows.append({
             # Every other row plots one stored metric; this one is a ratio, so the shape has to
             # be divided out second by second. The ratio of the two *stored* shapes would be a
@@ -298,16 +319,11 @@ def build_profile(baseline: list[dict]) -> list[dict]:
             "name": "Documents read per document returned",
             "scale": "1 : 1 is an index doing its job",
             "typical": f"{ratio:.0f} : 1",
-            "busiest": f"{scanned['p95']/max(returned['p95'],1):.0f} : 1",
+            "busiest": f"{busy:.0f} : 1",
             # No worst column: the ratio of two peaks that happened at different seconds is not
             # a ratio of anything.
             "peak": "—",
-            "reading": (
-                "Reading thousands of documents to answer one query is the signature of a query "
-                "with no usable index. Worth a look at the slow query log."
-                if ratio >= 100 else
-                "Close to one document read per document returned — queries are using indexes."
-            ),
+            "reading": targeting_reading(ratio, busy),
         })
 
     ck = pick(baseline, "serverStatus.wiredTiger.transaction.transaction checkpoint most recent time (msecs)")

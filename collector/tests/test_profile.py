@@ -103,6 +103,27 @@ def test_an_efficient_cluster_is_told_its_queries_use_indexes():
     assert "using indexes" in find_row(rows, "Documents read per document returned")["reading"]
 
 
+def test_a_cluster_at_35_to_1_is_not_told_its_queries_use_indexes():
+    """Measured on a customer set: 35 : 1 typical, 181 : 1 busy, printed beside "queries are
+    using indexes"."""
+    rows = build_profile([
+        row("rate(serverStatus.metrics.queryExecutor.scannedObjects)", 2_450, 181_000, 3e5),
+        row("rate(serverStatus.metrics.document.returned)", 70, 1_000, 2_000),
+    ])
+    reading = find_row(rows, "Documents read per document returned")["reading"]
+    assert "using indexes" not in reading
+    assert "181 : 1" in reading
+
+
+def test_a_middling_ratio_says_indexes_are_not_selective():
+    rows = build_profile([
+        row("rate(serverStatus.metrics.queryExecutor.scannedObjects)", 300, 500, 900),
+        row("rate(serverStatus.metrics.document.returned)", 10, 20, 30),
+    ])
+    reading = find_row(rows, "Documents read per document returned")["reading"]
+    assert "using indexes" not in reading and "selective" in reading
+
+
 def test_a_full_cache_is_reported_as_full():
     rows = build_profile([
         row("serverStatus.wiredTiger.cache.bytes currently in the cache", 7 * GB, 7.8 * GB, 8 * GB),

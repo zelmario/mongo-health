@@ -568,3 +568,11 @@ def test_a_scan_incident_says_when_its_scans_were_too_fast_to_be_logged(tmp_path
     page = (build(tmp_path, [spec]) / "prod" / "incidents" / "a.html").read_text()
     assert "None of these collection scans took longer than" in page
     assert "setProfilingLevel(0, { slowms: 20 })" in page
+
+
+def test_every_rule_has_a_name_for_its_chart():
+    # The fallback is the metric expression itself, which on a ratio like oplog-churn is a
+    # line of code wider than the chart, drawn over the threshold label.
+    rules = json.loads((Path(__file__).resolve().parent.parent / "rules.json").read_text())
+    missing = [r["id"] for r in rules["rules"] if r["id"] not in report.MEASURES]
+    assert missing == []

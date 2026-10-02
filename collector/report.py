@@ -301,7 +301,17 @@ MEASURES = {
     "packets-retransmitted":   ("TCP segments sent again", "per second", True),
     "oplog-window-short":      ("Oplog window", "seconds", False),
     "oplog-window-critical":   ("Oplog window", "seconds", False),
-    "command-latency-high":    ("Time per command", "us", True),
+    # Without an entry the chart was titled with the raw metric expression, which on oplog-churn
+    # ran the width of the chart and through the threshold label. test_report checks every rule
+    # in rules.json has one.
+    "oplog-churn":             ("Journal bytes per write", "bytes", True),
+    "write-conflicts":         ("Write conflicts", "per second", True),
+    "cursors-leaking":         ("Open cursors", "count", True),
+    "ttl-storm":               ("Documents deleted by TTL", "per second", True),
+    "connection-storm":        ("Connections opened", "per second", True),
+    "history-store-pinned":    ("History store share of the cache", "percent", True),
+    "sorts-spilling-to-disk":  ("Sorts spilling to disk", "per second", True),
+    "sorts-spilling-burst":    ("Sorts spilling to disk", "per second", True),
 }
 
 
@@ -758,7 +768,7 @@ CHART_IN, CHART_DPI = (8.4, 2.6), 200
 CHART_W, CHART_H = round(CHART_IN[0] * CHART_DPI), round(CHART_IN[1] * CHART_DPI)
 # Part of every chart's name: a change to how charts are drawn redraws the ones already held,
 # which are otherwise kept for ever because what they show never changes.
-CHART_STYLE = 5
+CHART_STYLE = 6
 
 
 def has_chart(finding: dict) -> bool:
@@ -878,7 +888,9 @@ img.shape { cursor: zoom-in; }
               font-size: 0.8125rem; font-weight: 600; }
 .recurrence a { color: var(--ink); margin-left: .3rem; }
 .logq td, .logq th { font-size: .8125rem; white-space: nowrap; }
-.logq td code { white-space: normal; word-break: break-word; }
+.logq td code { white-space: normal; overflow-wrap: anywhere; }
+/* A namespace is one word: broken anywhere it read "calib.sca / n". The table scrolls instead. */
+.logq td.ns code { white-space: nowrap; overflow-wrap: normal; }
 .logq .collscan { color: var(--bad); }
 .tod { margin: .4rem 0 .8rem; max-width: 40rem; }
 .tod figcaption { font-size: .8125rem; color: var(--ink-faint); }
@@ -1896,7 +1908,7 @@ def log_section(g, logs: list[dict] | None, add_files: str | None) -> str:
                 else esc(r["plan"]))
         source = ", ".join(sorted(r["apps"]) + [f"read {m}" for m in sorted(r["rp"])])
         body.append(
-            f'<tr><td class="muted">{esc(r["member"])}</td><td><code>{esc(r["ns"])}</code></td>'
+            f'<tr><td class="muted">{esc(r["member"])}</td><td class="ns"><code>{esc(r["ns"])}</code></td>'
             f'<td>{esc(r["op"])}</td><td><code>{esc(r["shape"] or "—")}</code></td>'
             f'<td>{plan}</td><td class="num">{r["n"]:,}</td><td class="num">{per(r["docs"])}</td>'
             f'<td class="num">{per(r["ret"])}</td><td class="num">{r["maxms"]:,} ms</td>'
