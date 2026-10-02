@@ -191,7 +191,16 @@ class AtlasSource:
 
         tmp = Path(tempfile.mkdtemp(prefix="ftdc-"))
         tarball = tmp / "bundle.tar.gz"
-        self._download(job_id, tarball)
+        try:
+            self._download(job_id, tarball)
+        except requests.exceptions.ChunkedEncodingError:
+            # Cut on every attempt: too big to arrive before Atlas ends the download. Kept, it
+            # was collected again every hour and cut again every hour -- a whole-history bundle
+            # ordered before the date filter was fixed did exactly that. Dropped, the next run
+            # orders a new one with the filter as it is now.
+            self.pending_job = None
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
         # Collected. Anything after this point is local work on a file we already hold, and a
         # failure there must not send the next run back to Atlas for the same bundle.
         self.pending_job = None

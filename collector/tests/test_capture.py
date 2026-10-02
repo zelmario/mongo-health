@@ -512,3 +512,18 @@ def test_a_first_capture_keeps_its_place_in_the_history(monkeypatch, tmp_path):
     assert saved["history_done"] is False
     assert saved["history_before"] == ordered[1][0].isoformat()
     assert saved["pending_window"][2] == "job3", "the window ordered is collected next time"
+
+
+def test_a_bundle_cut_on_every_attempt_is_not_collected_again(monkeypatch):
+    """Too big to arrive before Atlas ends the download, it was retried every hour for ever."""
+    monkeypatch.setattr(sources.requests, "get",
+                        lambda url, **kw: FakeResponse({"status": "SUCCESS"}))
+
+    def cut(self, job_id, target):
+        raise sources.requests.exceptions.ChunkedEncodingError("Response ended prematurely")
+
+    monkeypatch.setattr(AtlasSource, "_download", cut)
+    source = AtlasSource("g", "rs", "pub", "priv", pending_job="huge")
+    with pytest.raises(sources.requests.exceptions.ChunkedEncodingError):
+        list(source.fetch(datetime(2026, 10, 2, 6, tzinfo=timezone.utc)))
+    assert source.pending_job is None
