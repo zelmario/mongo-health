@@ -248,6 +248,12 @@ class _EmptyTar:
     def __exit__(self, *a):
         return False
 
+    # Python 3.11.2, which the image runs, has no tarfile data filter, so `extract` lists the
+    # members itself. Without this the five tests that use it failed in the image and passed
+    # only on a newer Python.
+    def getmembers(self):
+        return []
+
     def extractall(self, *a, **kw):
         pass
 

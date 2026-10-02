@@ -221,8 +221,7 @@ docker compose run --rm -T --entrypoint "" -v "$PWD":/repo -w /repo/collector \
   bash -c "pip install -q pytest && python3 -m pytest -q -p no:cacheprovider"
 ```
 
-The full run takes about 3.5 minutes. Five tests in `test_capture.py` and `test_job_timing.py`
-fail on a clean checkout and are being fixed.
+The full run takes one to three minutes.
 
 ## Contributing
 
