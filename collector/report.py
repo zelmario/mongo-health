@@ -2292,6 +2292,14 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
                        failed=read_json(base / "analysis-failed.json"),
                        capturing=capturing(base, now),
                        capture_failed=read_json(base / "capture-failed.json"))
+    if state.get("source_kind") == "atlas" and state.get("files") \
+            and state.get("history_done") is False and verdict.state not in BUSY:
+        # A first capture comes window by window, newest first (sources.AtlasSource.history).
+        # Until the last one lands, what is judged is the recent part of the history.
+        held = float(summary.get("days_of_raw_ftdc") or 0)
+        verdict = Verdict(verdict.state, f"{verdict.reason} Judged on the newest {held:.1f} "
+                          f"days so far. The older days Atlas holds are still being collected, "
+                          f"and arrive over the next rounds.", verdict.evidence)
     if verdict.state != "failed" and (stale := read_json(base / "analysis-failed.json")):
         # What is shown is the analysis before. Said, rather than presented as current.
         verdict = Verdict(verdict.state, f"{verdict.reason} The latest analysis failed "

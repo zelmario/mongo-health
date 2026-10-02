@@ -190,6 +190,11 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
             if source.history_before:
                 state.history_before = source.history_before.isoformat()
             state.history_done = source.history_done
+        if new:
+            # What arrived is captured even when the run fails after it. A network drop between
+            # two windows of a first capture left two days stored and analysed, and the page
+            # still said "The first capture failed".
+            state.last_capture = state.last_new_data = now()
         # Only overwritten when a job actually finished, so a run that timed out keeps the
         # previous cluster's measurement rather than replacing it with a number that describes
         # nothing.

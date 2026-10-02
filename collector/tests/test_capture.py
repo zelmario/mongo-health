@@ -508,6 +508,7 @@ def test_a_first_capture_keeps_its_place_in_the_history(monkeypatch, tmp_path):
 
     saved = json.loads((tmp_path / "c0" / "state.json").read_text())
     assert saved["files"], "the windows collected before the stop are kept"
+    assert saved["last_capture"], "and counted as captured: the page said the capture failed"
     assert saved["history_done"] is False
     assert saved["history_before"] == ordered[1][0].isoformat()
     assert saved["pending_window"][2] == "job3", "the window ordered is collected next time"
