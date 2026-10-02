@@ -416,3 +416,67 @@ def test_inside_a_round_the_analysis_does_not_wait_for_its_own_parent(monkeypatc
     monkeypatch.setenv("ROUND_LOCK_HELD", "1")
     with analyze.round_lock():
         pass
+
+
+# ------------------------------------------------------------- taken back by a re-analysis
+
+def _held(tmp_path):
+    return [json.loads(line) for line in
+            (tmp_path / "data/prod/findings.jsonl").read_text().splitlines()]
+
+
+def test_a_reanalysis_takes_back_what_the_data_no_longer_shows(tmp_path, monkeypatch):
+    """Cluster1: a redo that overlapped a capture reported a 3.3-hour outage the files do not
+    contain, and the next redo, over the complete files, could not take it back."""
+    spec = setup(tmp_path)
+    ghost = a_finding("ftdc-long-outage", worst=T0 + 2 * HOUR)
+    real = a_finding(worst=T0 + 5 * HOUR)
+    stub_engine(monkeypatch, engine_output(findings=[ghost, real]))
+    analyze_cluster(spec, tmp_path / "data", verbose=False)
+
+    stub_engine(monkeypatch, engine_output(findings=[real]))
+    analyze_cluster(spec, tmp_path / "data", redo=True, verbose=False)
+
+    assert [f["rule"] for f in _held(tmp_path)] == ["read-tickets-saturated"]
+    gone = [json.loads(line) for line in
+            (tmp_path / "data/prod/retracted.jsonl").read_text().splitlines()]
+    assert [f["rule"] for f in gone] == ["ftdc-long-outage"]
+    assert gone[0]["retracted_because"] and gone[0]["retracted_at"]
+    from state import State
+    state = State.load(tmp_path / "data/prod/state.json", "prod")
+    assert gone[0]["id"] not in state.reported_findings, "if it happens for real, it is new"
+
+
+def test_what_lies_past_the_data_still_held_is_kept(tmp_path, monkeypatch):
+    """Pruned FTDC cannot be checked again, so a finding over it stands."""
+    spec = setup(tmp_path)
+    old = a_finding(worst=T0 - 48 * HOUR)
+    stub_engine(monkeypatch, engine_output(findings=[old]))
+    analyze_cluster(spec, tmp_path / "data", verbose=False)
+    stub_engine(monkeypatch, engine_output(findings=[]))
+    analyze_cluster(spec, tmp_path / "data", redo=True, verbose=False)
+    assert len(_held(tmp_path)) == 1
+
+
+def test_what_depends_on_the_history_at_the_time_is_kept(tmp_path, monkeypatch):
+    spec = setup(tmp_path)
+    advice = a_finding("oversized-cluster", worst=T0 + HOUR)
+    stub_engine(monkeypatch, engine_output(findings=[advice]))
+    analyze_cluster(spec, tmp_path / "data", verbose=False)
+    stub_engine(monkeypatch, engine_output(findings=[]))
+    analyze_cluster(spec, tmp_path / "data", redo=True, verbose=False)
+    assert len(_held(tmp_path)) == 1
+
+
+def test_a_routine_run_takes_nothing_back(tmp_path, monkeypatch):
+    spec = setup(tmp_path)
+    stub_engine(monkeypatch, engine_output(findings=[a_finding(worst=T0 + HOUR)]))
+    analyze_cluster(spec, tmp_path / "data", verbose=False)
+    from state import State
+    state = State.load(tmp_path / "data/prod/state.json", "prod")
+    state.record("n0", "metrics.2026-08-07T02-00-00Z-00000", 1)
+    state.save(tmp_path / "data/prod/state.json")
+    (tmp_path / "data/prod/ftdc/n0/metrics.2026-08-07T02-00-00Z-00000").write_bytes(b"x")
+    stub_engine(monkeypatch, engine_output(findings=[]))
+    analyze_cluster(spec, tmp_path / "data", verbose=False)
+    assert len(_held(tmp_path)) == 1

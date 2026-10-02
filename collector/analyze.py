@@ -172,6 +172,50 @@ def refresh_charts(path: Path, charts: dict[str, dict]) -> None:
     tmp.replace(path)
 
 
+# What a re-analysis may take back. Not what depends on the history at the time it was found
+# rather than on the FTDC alone: an excursion is judged against the baseline as it was then,
+# sizing advice and a runway against everything held then.
+NOT_RETRACTABLE = frozenset({"baseline-excursion", "oversized-cluster", "capacity-runway"})
+
+
+def retract_unreproduced(base: Path, produced: set[str], nodes: list[dict], stamp: str) -> set[str]:
+    """Findings held that a full re-analysis no longer produces, over data it still has.
+
+    A redo of Cluster1 that overlapped a capture saw a node's newest file before it arrived and
+    reported a 3.3-hour outage that the data does not contain; the next redo, over the complete
+    files, did not produce it, and the report kept saying "At risk". Taken back only when the
+    finding lies wholly inside the raw FTDC its node still holds: past retention there is
+    nothing left to check it against, and a finding that cannot be checked is kept. Moved to
+    retracted.jsonl with when and why, never deleted without a trace.
+    """
+    path = base / "findings.jsonl"
+    if not path.exists():
+        return set()
+    extent = {}
+    for n in nodes:
+        for label in (n.get("hostname"), n.get("node")):
+            if label:
+                extent[label] = (n["fromMs"], n["toMs"])
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    keep, gone = [], []
+    for row in rows:
+        held = extent.get(row.get("node"))
+        if (row.get("id") not in produced and row.get("rule") not in NOT_RETRACTABLE
+                and held is not None
+                and held[0] <= int(row["fromMs"]) and int(row["toMs"]) <= held[1]):
+            gone.append(dict(row, retracted_at=stamp,
+                             retracted_because="a full re-analysis of the FTDC still held "
+                                               "no longer produces it"))
+        else:
+            keep.append(row)
+    if gone:
+        append(base / "retracted.jsonl", gone)
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in keep))
+        tmp.replace(path)
+    return {r["id"] for r in gone}
+
+
 def append(path: Path, rows: list[dict]) -> None:
     if not rows:
         return
@@ -305,11 +349,13 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
     already = set(state.reported_findings)
     fresh = []
     redrawn: dict[str, dict] = {}
+    produced: set[str] = set()
     for f in (out["findings"]
               + anomaly.as_findings(excursions, window_from, window_to, nodes)
               + advice
               + ahead):
         fid = finding_id(cluster_id, f)
+        produced.add(fid)
         if fid in already:
             if redo:
                 redrawn[fid] = {k: f[k] for k in REFRESHED if f.get(k)}
@@ -325,6 +371,11 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
     state.reported_findings.extend(f["id"] for f in fresh)
     if redrawn:
         refresh_charts(base / "findings.jsonl", redrawn)
+    if redo:
+        gone = retract_unreproduced(base, produced, nodes, stamp)
+        state.reported_findings = [i for i in state.reported_findings if i not in gone]
+        if gone and verbose:
+            print(f"  {len(gone)} finding(s) no longer reproduced, retracted")
 
     # --- baseline: one row per metric per run ---------------------------------------
     # Two scopes, kept apart because they answer different questions. `baseline` covers
