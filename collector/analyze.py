@@ -86,7 +86,15 @@ def sync_runner(repo: Path) -> Path:
     return script
 
 
-def run_engine(ftdc: Path, since: str | None, timeout: int = 1800,
+# Half an hour for an hourly round, which decodes the last two days. A run with no `since` is a
+# full re-analysis and decodes everything held, so its cost grows with retention: a --redo of
+# Cluster1 (20 days, 1.2 GB) ran past the half hour on 2026-10-05 and left the cluster reading
+# "the latest analysis failed". Still bounded, so a hung engine cannot hold the round lock for
+# ever.
+ROUND_TIMEOUT, FULL_TIMEOUT = 1800, 4 * 3600
+
+
+def run_engine(ftdc: Path, since: str | None, timeout: int | None = None,
                daily: Path | None = None, progress: Path | None = None) -> dict:
     """Invoke the runner inside Big Hole and return its JSON.
 
@@ -107,6 +115,8 @@ def run_engine(ftdc: Path, since: str | None, timeout: int = 1800,
     if progress is not None:
         cmd += ["--progress", str(progress.resolve())]
 
+    if timeout is None:
+        timeout = ROUND_TIMEOUT if since else FULL_TIMEOUT
     r = subprocess.run(cmd, cwd=repo, capture_output=True, text=True, timeout=timeout)
     if r.returncode != 0:
         raise RuntimeError(f"engine failed ({r.returncode}): {r.stderr.strip()[-400:]}")
