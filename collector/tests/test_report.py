@@ -585,3 +585,44 @@ def test_a_capture_marker_from_a_killed_run_is_ignored(tmp_path):
     assert report.capturing(tmp_path, now)["stage"] == "build"
     marker.write_text(json.dumps({"started": "2026-10-02T13:00:00Z", "stage": "build"}))
     assert report.capturing(tmp_path, now) is None
+
+
+def test_large_ticks_carry_their_magnitude():
+    # A "1e7" in the corner of the axis was all that said the peaks were ten million.
+    assert report.compact_number(10_000_000) == "10M"
+    assert report.compact_number(2_500_000) == "2.5M"
+    assert report.compact_number(1_500) == "1.5k"
+    assert report.compact_number(100) == "100"
+    assert report.compact_number(0.25) == "0.25"
+    assert report.compact_number(0) == "0"
+
+
+def test_a_threshold_dwarfed_by_the_peak_gets_a_log_axis():
+    # The query-targeting chart that looked healthy: a limit of 100 under peaks of ten million.
+    flat_then_storm = [0, 1, 2, 0] + [5e6, 1e7, 9e6] + [0, 1]
+    assert report.log_axis_from(flat_then_storm, 100, True) == 10
+    # A peak a few times over its line is readable as it is.
+    assert report.log_axis_from([0, 50, 300, 450], 100, True) is None
+    # Rules that fire when a number falls, and series that go negative, stay linear.
+    assert report.log_axis_from(flat_then_storm, 100, False) is None
+    assert report.log_axis_from([-1] + flat_then_storm, 100, True) is None
+    assert report.log_axis_from(flat_then_storm, None, True) is None
+
+
+def test_the_query_targeting_chart_draws_on_a_log_axis():
+    t0 = 1_759_352_000_000
+    v = [0.0] * 30 + [1e7] * 30 + [0.0] * 30
+    chart = {"t": [t0 + i * 10_000 for i in range(len(v))], "v": v, "threshold": 100}
+    png = report.incident_chart(chart, "warning", t0 + 300_000, t0 + 600_000,
+                                rule="query-targeting-poor")
+    assert png and png.startswith(b"\x89PNG")
+
+
+def test_every_page_offers_a_pdf_and_prints_without_its_forms(tmp_path):
+    # Saved as PDF to send to somebody: the button is on the page, and neither it nor any form
+    # survives into the printout, since nothing can be submitted from a PDF.
+    page = report.layout("t", "<p>x</p>", "", datetime(2026, 10, 5, tzinfo=timezone.utc))
+    assert 'class="secondary small save-pdf"' in page
+    assert "print();" in page
+    printed = page.split("@media print", 1)[1]
+    assert ".save-pdf" in printed and ".needs-server" in printed and "form" in printed

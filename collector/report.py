@@ -264,6 +264,41 @@ def _axis_units(unit: str, series: list) -> tuple[float, str]:
     return 1, unit
 
 
+def compact_number(v: float) -> str:
+    """A tick label a person reads at a glance: 10M, not 1.0 next to a "1e7" in the corner.
+
+    matplotlib moves the magnitude of a large axis into an offset label at the top left, and on
+    a query-targeting chart peaking at ten million that label was the only thing saying so. The
+    reader saw a line at "1.0" and a threshold at 100 and concluded nothing was wrong.
+    """
+    a = abs(v)
+    for step, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "k")):
+        if a >= step:
+            return f"{v / step:.3g}{suffix}"
+    return f"{v:.6g}"
+
+
+# How far above its threshold a chart's peak has to go before a linear axis stops showing the
+# threshold at all. At a thousand times, the line sits at a tenth of a percent of the height:
+# the query-targeting chart drew its limit of 100 under peaks of ten million, flat on zero.
+LOG_AXIS_FROM = 1000
+
+
+def log_axis_from(values, threshold, higher_is_worse: bool) -> float | None:
+    """The linear zone of a symlog y axis for this chart, or None to keep it linear.
+
+    Symlog rather than log because these series sit at zero for most of their length -- a ratio
+    with nothing scanned is 0 -- and a log axis has nowhere to put zero. Below a tenth of the
+    threshold the axis stays linear, so the quiet stretches still read as quiet.
+    """
+    if threshold is None or not higher_is_worse or threshold <= 0:
+        return None
+    seen = [v for v in values if v is not None and v == v]
+    if not seen or min(seen) < 0 or max(seen) < threshold * LOG_AXIS_FROM:
+        return None
+    return threshold / 10
+
+
 MEASURES = {
     "read-tickets-saturated":  ("WiredTiger read tickets", "tickets", False),
     "write-tickets-saturated": ("WiredTiger write tickets", "tickets", False),
@@ -285,7 +320,9 @@ MEASURES = {
     # bytes, not kB: the reader scales `_kb` paths on the way out (see PATH_SCALES).
     "memory-low":              ("Host memory", "bytes", False),
     "connections-high":        ("Connections", "count", True),
-    "query-targeting-poor":    ("Documents read per document returned", "count", True),
+    # Not "count": the axis and the threshold line read "100 count", which says nothing about
+    # what is being counted. The title names the measure; the unit says what one of it is.
+    "query-targeting-poor":    ("Documents read per document returned", "read per returned", True),
     "collection-scans-sustained": ("Full collection scans", "per-sec", True),
     "eviction-by-app-threads": ("Query threads forced to evict", "percent", True),
     "eviction-aggressive":     ("Aggressive eviction", "count", True),
@@ -733,6 +770,19 @@ def incident_chart(chart: dict | None, severity: str, worst_from: int, worst_to:
             ax.legend(loc="lower right", bbox_to_anchor=(1.0, 1.0), frameon=False,
                       fontsize=7.5, labelcolor=SIGNAL, handlelength=1.6, borderaxespad=0.2)
 
+    # A peak far above its threshold squashes the threshold onto zero on a linear axis, and the
+    # chart then argues against its own finding. Decided on what is drawn, after rescaling.
+    linthresh = (log_axis_from([rescale(v) for s in series for v in s["v"]],
+                               None if threshold is None else threshold / scale,
+                               higher_is_worse)
+                 if not baseline_line and not forecast else None)
+    if linthresh:
+        ax.set_yscale("symlog", linthresh=linthresh)
+        ax.set_ylim(bottom=0)
+        axis_label = f"{axis_label} (log scale)" if axis_label else "log scale"
+    # After the scale: set_yscale replaces the formatter.
+    from matplotlib.ticker import FuncFormatter
+    ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: compact_number(v)))
     ax.set_ylabel(axis_label, fontsize=7.5, color=SOFT)
     # MEASURES is keyed by rule, which cannot name a baseline excursion: the same rule fires on
     # whichever metric moved, so the title has to come from the finding.
@@ -772,7 +822,7 @@ CHART_IN, CHART_DPI = (8.4, 2.6), 200
 CHART_W, CHART_H = round(CHART_IN[0] * CHART_DPI), round(CHART_IN[1] * CHART_DPI)
 # Part of every chart's name: a change to how charts are drawn redraws the ones already held,
 # which are otherwise kept for ever because what they show never changes.
-CHART_STYLE = 6
+CHART_STYLE = 7
 
 
 def has_chart(finding: dict) -> bool:
@@ -1040,6 +1090,20 @@ label.pick input { margin: 0; }
 
 /* Forms need the server that serves the site; opened from disk there is none. */
 .from-disk .needs-server { display: none; }
+/* Printed, which in practice means saved as PDF to send to somebody. The page keeps its dark
+   colours: the charts are drawn on the panel colour, and on white paper each one became a dark
+   slab. Forms and the button go, since nobody can submit anything from a PDF; a card or a
+   chart is never cut across two pages. */
+header.top button.save-pdf { margin-left: 0.8rem; }
+@media print {
+  @page { margin: 0; }
+  html, body { -webkit-print-color-adjust: exact; print-color-adjust: exact;
+               background: var(--ground); }
+  .wrap { max-width: none; padding: 12mm 14mm; }
+  .save-pdf, .needs-server, .zoom, form { display: none !important; }
+  .finding, .card, img.shape, figure, tr { break-inside: avoid; }
+  h1, h2, h3 { break-after: avoid; }
+}
 form.inline { display: inline; margin: 0; }
 .fixed-note { margin: 1.5rem 0; border-left: 3px solid var(--ok); }
 .fixed-note p { margin: 0 0 .4rem; }
@@ -1174,7 +1238,8 @@ def layout(title: str, body: str, root: str, generated: datetime) -> str:
   if (location.protocol === "file:") document.documentElement.classList.add("from-disk");
 </script><div class="wrap">
 <header class="top"><a class="brand" href="{root}index.html">mongo-health</a>
-  <span>as of {esc(stamp)}</span></header>
+  <span>as of {esc(stamp)}
+    <button type="button" class="secondary small save-pdf">Save as PDF</button></span></header>
 {body}
 <footer>Rebuilt after every collector run. Times are UTC. Analysis by
   <a href="https://github.com/zelmario/Big-hole">Big Hole</a>.</footer>
@@ -1197,6 +1262,17 @@ document.addEventListener('click', (e) => {
 });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') document.querySelector('.zoom')?.remove();
+});
+
+/* The browser's own print dialog, with "Save as PDF" as the destination. Folded sections are
+   opened first, because a PDF cannot be clicked: whatever is closed when it is made is lost to
+   whoever it is sent to. They are folded back afterwards, so the page is left as it was. */
+document.querySelector('.save-pdf')?.addEventListener('click', () => {
+  const closed = [...document.querySelectorAll('details:not([open])')]
+    .filter((d) => !d.closest('.needs-server'));
+  closed.forEach((d) => { d.open = true; });
+  addEventListener('afterprint', () => closed.forEach((d) => { d.open = false; }), { once: true });
+  print();
 });
 """
 
