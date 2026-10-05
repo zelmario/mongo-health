@@ -45,7 +45,7 @@ AREA_OF = {
     "cache-dirty-high": "cache", "cache-full": "cache", "eviction-by-app-threads": "cache",
     "eviction-aggressive": "cache", "memory-low": "cache", "page-faults-sustained": "cache",
     "swapping": "cache",
-    "history-store-pinned": "cache",
+    "history-store-pinned": "cache", "pages-read-into-cache": "cache",
     "checkpoint-slow": "storage", "disk-read-latency-high": "storage",
     "disk-write-latency-high": "storage",
     "disk-space-low": "storage", "disk-space-critical": "storage",
@@ -57,7 +57,7 @@ AREA_OF = {
     "write-conflicts": "queries", "cursors-leaking": "queries", "ttl-storm": "queries",
     "connections-high": "connections", "connection-storm": "connections",
     "command-latency-high": "connections", "slow-wire-not-server": "connections",
-    "packets-retransmitted": "connections",
+    "packets-retransmitted": "connections", "client-disconnect-kills": "connections",
 }
 
 # The read and write halves of a pair share one comment in rules.ts; the second inherits it.

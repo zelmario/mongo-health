@@ -312,6 +312,8 @@ MEASURES = {
     "history-store-pinned":    ("History store share of the cache", "percent", True),
     "sorts-spilling-to-disk":  ("Sorts spilling to disk", "per second", True),
     "sorts-spilling-burst":    ("Sorts spilling to disk", "per second", True),
+    "client-disconnect-kills": ("Operations killed after the client left", "per second", True),
+    "pages-read-into-cache":   ("Pages read into the cache", "per second", True),
     "rolling-restart":         ("Uptime", "seconds", False),
     "member-restarted":        ("Uptime", "seconds", False),
 }

@@ -2,7 +2,7 @@
 
 Every check mongo-health runs, what it looks at, when it speaks and why at that threshold. Generated from the code by `collector/catalog.py`; the threshold rules come from `big-hole/src/insights/rules.ts`, reasoning included.
 
-38 threshold rules, 11 detectors and 13 configuration checks.
+40 threshold rules, 11 detectors and 13 configuration checks.
 
 ## Concurrency and queues
 
@@ -201,6 +201,20 @@ What separates them is the history store. Under ordinary pressure it does not gr
 Expressed against the cache size rather than in bytes, because what matters is how much of the cache is being spent on versions nobody asked for. Measured on a soak run: at rest the history store held a median of 1% of the cache with a p95 of 9%; inside the injected incident the median was 8% and it reached 47%. Twenty is above anything the run produced without something holding a snapshot.
 
 **What to check.** Look for a long-running query, an open transaction, or a cursor nobody closed — the oldest one is usually the culprit. Adding memory does not help here: the versions are kept because a reader still needs them, and they will be freed the moment it finishes.
+
+### The cache is reading heavily from disk — `pages-read-into-cache`
+
+**Severity:** warning · **Speaks when:** ≥ 10,000/s for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `rate(serverStatus.wiredTiger.cache.pages read into cache)`
+
+WiredTiger was reading pages from disk into the cache at a sustained high rate, which is what a working set larger than the cache looks like.
+
+**Why this threshold.** Pages WiredTiger had to bring in from disk because they were not in the cache. A working set that fits reads few; one that does not keeps evicting and reading back. Ten thousand a second. Measured with try-rule.ts on four captures: the lab and an idle Atlas M10 over 20 days never held 1,000/s for a minute; a busy 8.0 support bundle held it twice (peak ~19,000/s) and never 5,000/s. A customer primary already known for read-ticket saturation held 10,000/s every day from about 10:00 to 00:35 UTC, peaking at 135,287/s: seven findings, one a day, on that member only. Its secondaries peaked at 12,000-24,000/s but never held 10,000/s for a minute. 20,000/s found the same seven days with shorter windows, so the lower line keeps the whole episode.
+
+This one depends on the hardware more than most: fast local NVMe absorbs a rate that network storage cannot. The check says so rather than the threshold pretending otherwise.
+
+**What to check.** Read it with the disk latency and the read tickets for the same minutes: if reads are slow or tickets are queueing, the disk is the bottleneck. Look for collection scans and unindexed queries that touch far more data than they return, then for a cache too small for the data actually in use. On fast local disks this rate can be harmless.
 
 ## Storage
 
@@ -579,6 +593,18 @@ New connections were being opened far faster than a healthy client does, which i
 **Why this threshold.** The rate of NEW connections, which is a different failure from a pool that is merely large. A steady 2,000 connections is a well-behaved application with a big pool; 200 new ones a second is a client reconnecting in a loop, and each handshake costs the server real work before any query runs. At rest this cluster created 0 new connections a second at both the median and the p95. Across three injected storms the p95 ran 36-58/s with peaks to 252/s. Ten is well clear of the reconnect that follows an ordinary deploy. Short, because a storm is short and self-inflicted: the pool exhausts, clients back off, it starts again. Waiting a minute would miss the ones that matter.
 
 **What to check.** Driver pool settings and timeouts on the application side. A storm is usually a client giving up and retrying rather than the server refusing anything, and it costs the server handshake work that competes with real queries.
+
+### Operations were killed because the client hung up — `client-disconnect-kills`
+
+**Severity:** warning · **Speaks when:** ≥ 50/s for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `rate(serverStatus.metrics.operation.killedDueToClientDisconnect)`
+
+The server was killing operations because the client that sent them had already disconnected, so it spent time and resources on results nobody was waiting for.
+
+**Why this threshold.** An operation the server was still running when the client closed the connection. The client gave up first -- a driver socketTimeoutMS or timeoutMS, or an application timeout -- and every one of them is work the server did for nobody. Fifty a second. Measured with try-rule.ts on four captures: the lab, an idle Atlas M10 over 20 days and a busy 8.0 support bundle never held even 5/s for a minute. A customer replica set is the reason the line sits this high: its secondaries ran 5 to 85 kills a second for about twelve hours every day, so 5/s gave 64 findings, 20/s gave 150, and the report would be that background repeated. At 50/s only the event stands out: a daily burst at 07:00 UTC on all three members, ~870 s each, peaking at 234-245/s. 20 findings over seven days, all of them that burst.
+
+**What to check.** Compare the client timeouts with how long these queries really take: a socketTimeoutMS or application timeout shorter than the query means it is retried while the first attempt still runs. Find the operations in the slow query log at that time and either make them faster or set maxTimeMS so the server stops them itself.
 
 ## Events
 
