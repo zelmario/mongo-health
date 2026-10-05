@@ -28,6 +28,14 @@ HOUR_MS = 3_600_000
 AT_RISK_HOURS = 24
 ATTENTION_DAYS = 7
 
+# Findings that are listed but do not decide the verdict alone when they are this short, in
+# seconds, on one member. Packet loss is the case: Cluster1 read "Needs attention" for 45 s of
+# TCP retransmissions on one member, the only time in 22 days, while the server never noticed.
+# The rule keeps its 30 s sustain because a 41 s injected loss is exactly what it must catch;
+# what changes is only how loudly a lone blip speaks. Two members at once is not a blip: that
+# is what they share, and it still counts.
+BRIEF = {"packets-retransmitted": 60}
+
 LABELS = {
     "unwatched": "Not being watched",
     "pending": "Not checked yet",
@@ -78,6 +86,16 @@ def _describe(found: list, now_ms: int, window: str, archive: bool = False) -> s
         tail = f"in its last {window}" if archive else f"in the last {window}"
         line += f" — and {rest} more incident{'s' if rest != 1 else ''} {tail}"
     return line + "."
+
+
+def _brief_and_alone(f: dict, findings: list[dict]) -> bool:
+    """A short episode of a BRIEF rule with no other member showing the same within a minute."""
+    limit = BRIEF.get(f.get("rule"))
+    if limit is None or (f.get("secondsInState") or 0) >= limit:
+        return False
+    lo, hi = int(f["fromMs"]) - 60_000, int(f["toMs"]) + 60_000
+    return not any(o is not f and o.get("rule") == f["rule"] and o.get("node") != f.get("node")
+                   and int(o["fromMs"]) <= hi and int(o["toMs"]) >= lo for o in findings)
 
 
 def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
@@ -154,6 +172,12 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
 
     now_ms = int(now.timestamp() * 1000)
     serious = [f for f in findings if f.get("severity") in ("critical", "warning")]
+    # Still on the page, still in the incident list; just not the reason for the verdict.
+    blips = [f for f in serious if _brief_and_alone(f, findings)
+             and int(f["toMs"]) >= now_ms - ATTENTION_DAYS * 24 * HOUR_MS]
+    serious = [f for f in serious if not any(f is b for b in blips)]
+    aside = (f" {len(blips)} brief network blip{'s' if len(blips) != 1 else ''} on a single "
+             f"member {'is' if len(blips) == 1 else 'are'} listed below." if blips else "")
     # A rolling restart is information on its own, but when it is what the serious signals
     # came from, it is what the verdict should name first: "members not answering" on Cluster1
     # was the restart Atlas did, and said alone it read as an outage.
@@ -181,7 +205,7 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
         held = f"{days_held:.0f} days" if days_held >= 2 else f"{days_held * 24:.0f} hours"
         return Verdict("files_clean", f"Nothing critical or worth a look in the last "
                                       f"{ATTENTION_DAYS} days of the FTDC. Every check ran over "
-                                      f"{held} of history.{upto}")
+                                      f"{held} of history.{aside}{upto}")
 
     if critical_today:
         return Verdict("at_risk", _describe(critical_today, now_ms, "day"), critical_today)
@@ -194,4 +218,4 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
             f"{days_held * 24:.0f} hours" if days_held > 0 else "the history held")
     return Verdict("healthy",
                    f"Nothing critical or worth a look in the last {ATTENTION_DAYS} days. "
-                   f"Every check ran over {held} of history.")
+                   f"Every check ran over {held} of history.{aside}")

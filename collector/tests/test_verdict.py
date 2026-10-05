@@ -163,3 +163,32 @@ def test_the_verdict_names_the_rolling_restart_the_alerts_came_from():
 def test_a_rolling_restart_with_nothing_serious_is_not_a_problem():
     restart = f("r", severity="info", rule="rolling-restart", ended_hours_ago=30)
     assert verdict([restart]).state == "healthy"
+
+
+def blip(fid, node, seconds=30, ended_hours_ago=13):
+    out = f(fid, "warning", ended_hours_ago=ended_hours_ago, rule="packets-retransmitted",
+            lasted_hours=45 / 3600)
+    out.update(node=node, secondsInState=seconds)
+    return out
+
+
+def test_a_lone_short_packet_loss_is_listed_not_the_verdict():
+    # Cluster1: 45 s of retransmissions on one member, the only time in 22 days.
+    v = verdict([blip("a", "shard-00-01")])
+    assert v.state == "healthy"
+    assert "1 brief network blip on a single member is listed below" in v.reason
+
+
+def test_packet_loss_long_enough_still_needs_attention():
+    assert verdict([blip("a", "shard-00-01", seconds=60)]).state == "attention"
+
+
+def test_packet_loss_on_two_members_at_once_is_not_a_blip():
+    v = verdict([blip("a", "shard-00-01"), blip("b", "shard-00-02")])
+    assert v.state == "attention"
+
+
+def test_a_blip_does_not_hide_anything_else():
+    v = verdict([blip("a", "shard-00-01"), f("b", "warning", ended_hours_ago=5)])
+    assert v.state == "attention"
+    assert v.reason.startswith("Title b")
