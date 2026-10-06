@@ -492,8 +492,12 @@ describe('the shipped rule set', () => {
     // state, and for those the shorter window is the whole point -- but each one is named here,
     // so shortening a rule stays a decision somebody made rather than a mistyped zero.
     const BURSTS = new Set(['sorts-spilling-burst']);
+    // A counter the server moves only every few seconds: one second in four is in breach, so
+    // 20 s of it is some 80 s of wall time, longer than the norm and not shorter. Measured on
+    // the lab, a 60 s sustain missed three minutes of 20 cursor timeouts a second.
+    const STEPPED = new Map([['cursor-timeouts', 20_000]]);
     for (const rule of RULES) {
-      const floor = BURSTS.has(rule.id) ? 5_000 : 30_000;
+      const floor = BURSTS.has(rule.id) ? 5_000 : STEPPED.get(rule.id) ?? 30_000;
       expect(rule.sustainMs, `${rule.id} would fire on too few samples`).toBeGreaterThanOrEqual(
         floor,
       );

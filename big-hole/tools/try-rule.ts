@@ -19,30 +19,26 @@ import { CaptureReader } from '../src/data/reader.js';
 import { detect, type DetectCapture, type Rule } from '../src/insights/detect.js';
 import type { SeriesQuery } from '../src/data/reader.js';
 
-const CANDIDATES: Array<Omit<Rule, 'threshold' | 'id' | 'title'> & { id: string; thresholds: number[] }> = [
-  {
-    id: 'client-disconnect-kills',
-    severity: 'warning',
-    metric: 'rate(serverStatus.metrics.operation.killedDueToClientDisconnect)',
-    op: '>=',
-    thresholds: [5, 10, 20, 50],
-    sustainMs: 60_000,
-    toleranceMs: 30_000,
-    unit: 'per-sec',
-    what: '', check: '',
-  },
-  {
-    id: 'pages-read-into-cache',
-    severity: 'warning',
-    metric: 'rate(serverStatus.wiredTiger.cache.pages read into cache)',
-    op: '>=',
-    thresholds: [1_000, 5_000, 10_000, 20_000],
-    sustainMs: 60_000,
-    toleranceMs: 30_000,
-    unit: 'per-sec',
-    what: '', check: '',
-  },
-];
+const CANDIDATES: Array<Omit<Rule, 'threshold' | 'id' | 'title'> & { id: string; thresholds: number[] }> = [];
+// Counters that read zero on every real capture held, injected on the lab (2026-10-06). Each at
+// the collector's usual 60 s sustain and at 20 s: some step only every few seconds (the cursor
+// monitor sweeps every 4 s), and only the seconds in breach count towards the sustain.
+for (const [id, metric, thresholds] of [
+  ['maxtime-kills', 'rate(serverStatus.metrics.operation.killedDueToMaxTimeMSExpired)', [0.2, 1, 5, 10]],
+  ['cursor-timeouts', 'rate(serverStatus.metrics.cursor.timedOut)', [0.2, 1, 5, 10]],
+  ['aborted-transactions', 'rate(serverStatus.transactions.totalAborted)', [0.2, 1, 5, 20]],
+  ['user-asserts', 'rate(serverStatus.asserts.user)', [5, 50, 200, 500]],
+  ['rejected-connections', 'rate(serverStatus.connections.rejected)', [0.2, 1, 5, 10]],
+] as const) {
+  for (const sustainMs of [60_000, 20_000]) {
+    CANDIDATES.push({
+      id: `${id} (sustain ${sustainMs / 1000} s)`, severity: 'warning', metric, op: '>=',
+      thresholds: [...thresholds], sustainMs, toleranceMs: 30_000, unit: 'per-sec',
+      what: '', check: '',
+    });
+  }
+}
+
 
 const root = process.argv[2]!;
 const nodes = readdirSync(root).filter((n) => statSync(join(root, n)).isDirectory()).sort();
@@ -84,7 +80,7 @@ for (const c of CANDIDATES) {
                 `${Math.round(seconds)} s in breach`);
     for (const f of found.slice(0, 8)) {
       console.log(`      ${f.captureLabel.padEnd(28)} ${at(f.firstMs)} -> ${at(f.lastMs)}  ` +
-                  `${Math.round(f.totalMs / 1000)} s, ${f.episodes} episode(s), peak ${Math.round(f.peak)}`);
+                  `${Math.round(f.totalMs / 1000)} s, ${f.episodes} episode(s), peak ${Math.round(f.peak * 10) / 10}`);
     }
     if (found.length > 8) console.log(`      … ${found.length - 8} more`);
   }

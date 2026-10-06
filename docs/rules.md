@@ -2,7 +2,7 @@
 
 Every check mongo-health runs, what it looks at, when it speaks and why at that threshold. Generated from the code by `collector/catalog.py`; the threshold rules come from `big-hole/src/insights/rules.ts`, reasoning included.
 
-40 threshold rules, 11 detectors and 13 configuration checks.
+44 threshold rules, 11 detectors and 13 configuration checks.
 
 ## Concurrency and queues
 
@@ -468,6 +468,44 @@ The TTL monitor was deleting documents far faster than usual, which competes wit
 
 **What to check.** Whether a bulk load just landed with expiry dates in the past, or a TTL index was created over existing data. The deletions are real writes: they fill the oplog and the cache like any other.
 
+### Operations were stopped by their own time limit — `maxtime-kills`
+
+**Severity:** warning · **Speaks when:** ≥ 1/s for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `rate(serverStatus.metrics.operation.killedDueToMaxTimeMSExpired)`
+
+Operations kept running past the time limit (maxTimeMS) their client gave them, so the server stopped them after doing the work and returned nothing.
+
+**Why this threshold.** An operation that ran past the maxTimeMS its client set. The limit did its job, but every one is work done and thrown away, and a steady stream of them means the queries no longer fit the time they were given. One a second for a minute. Injected: full scans of 1M documents with maxTimeMS(5), at 1/s and at 20/s. Both phases fired (320 s in breach, peak 22/s), and a 30-second burst at 20/s did not, which is what the 60 s sustain is for: an application that uses maxTimeMS on purpose will see the odd kill, and that is not the finding. The four real captures held (lab, Atlas M10, an 8.0 bundle, a customer set) gave 0 at 0.2/s and up.
+
+**What to check.** Find the operations in the slow query log around this time: the ones ending with MaxTimeMSExpired. Either the query got slower (a missing index, a plan change, more data) or the server was too busy to finish it in time, and the other findings at the same moment usually say which.
+
+### Transactions were being aborted — `aborted-transactions`
+
+**Severity:** warning · **Speaks when:** ≥ 1/s for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `rate(serverStatus.transactions.totalAborted)`
+
+Transactions were being rolled back at a steady rate, so the writes inside them were done and then undone.
+
+**Why this threshold.** Aborted by the client, by a write conflict, or by transactionLifetimeLimitSeconds. All three look the same here, and all three mean the work inside them was rolled back. One a second for a minute. Injected: start a transaction, insert, abort, at 1/s and at 50/s (the lab reached 17/s). Both phases fired, 305 s in breach, peak 31/s. The four real captures held gave 0 at 0.2/s and up.
+
+**What to check.** Look for WriteConflict and TransactionExceededLifetimeLimitSeconds in the mongod log. Conflicts mean transactions touching the same documents at the same time; lifetime aborts mean transactions held open too long. An application that aborts on purpose shows neither.
+
+### Idle cursors were timing out — `cursor-timeouts`
+
+**Severity:** warning · **Speaks when:** ≥ 1/s for 20 s, dips of up to 30 s tolerated
+
+**Metric:** `rate(serverStatus.metrics.cursor.timedOut)`
+
+The server kept closing cursors that clients had opened and then stopped reading, which usually means an application that abandons its query results half way.
+
+**Why this threshold.** Cursors the server closed because nobody asked for the next batch within cursorTimeoutMillis (10 minutes by default). Since 4.4.8 a cursor opened inside a session is closed with its session instead, and drivers always open one, so this counts only cursors opened outside a session -- the lab had to open them on a raw connection. One a second, held for 20 s rather than the usual 60. The server sweeps for idle cursors every 4 seconds, so the counter moves once per sweep and the rate reads 0, 0, 0, 80: only those seconds count towards the sustain. Injected at 1/s and at 20/s for three minutes each, a 60 s sustain caught neither; 20 s caught both, 92 s in breach, peak 140/s, and still nothing on the four real captures.
+
+**What to check.** Find which client opens cursors outside a session: an old driver, or a tool that talks to the server on a raw connection. Each one held memory and a snapshot for the whole timeout before the server reclaimed it.
+
+**Over a connection string (a sample every ten seconds):** needs 20 s in breach, which is 2 sample(s) at ten seconds: short bursts are seen coarsely or not at all.
+
 ### Sorts are spilling to disk — `sorts-spilling-to-disk`
 
 **Severity:** warning · **Speaks when:** ≥ 1/s for 30 s, dips of up to 30 s tolerated
@@ -605,6 +643,18 @@ The server was killing operations because the client that sent them had already 
 **Why this threshold.** An operation the server was still running when the client closed the connection. The client gave up first -- a driver socketTimeoutMS or timeoutMS, or an application timeout -- and every one of them is work the server did for nobody. Fifty a second. Measured with try-rule.ts on four captures: the lab, an idle Atlas M10 over 20 days and a busy 8.0 support bundle never held even 5/s for a minute. A customer replica set is the reason the line sits this high: its secondaries ran 5 to 85 kills a second for about twelve hours every day, so 5/s gave 64 findings, 20/s gave 150, and the report would be that background repeated. At 50/s only the event stands out: a daily burst at 07:00 UTC on all three members, ~870 s each, peaking at 234-245/s. 20 findings over seven days, all of them that burst.
 
 **What to check.** Compare the client timeouts with how long these queries really take: a socketTimeoutMS or application timeout shorter than the query means it is retried while the first attempt still runs. Find the operations in the slow query log at that time and either make them faster or set maxTimeMS so the server stops them itself.
+
+### The server was turning clients away — `rejected-connections`
+
+**Severity:** critical · **Speaks when:** ≥ 1/s for 60 s, dips of up to 30 s tolerated
+
+**Metric:** `rate(serverStatus.connections.rejected)`
+
+The server was refusing new connections because it had reached its connection limit, so some clients could not connect at all.
+
+**Why this threshold.** Connections refused because the server was already at net.maxIncomingConnections. Every one is a client that could not reach the database at all. One a second for a minute. Injected: node2 restarted with maxIncomingConnections 40, filled, then new connections at 1/s and at 20/s. Both phases fired on node2 and only on node2, 311 s in breach, peak 22/s. The four real captures held gave 0 at 0.2/s and up.
+
+**What to check.** Compare the connection count with net.maxIncomingConnections and the file descriptor limit. Then look at the clients: a pool sized too large across many application instances, or connections opened and never closed, fill the limit long before the server is busy.
 
 ## Events
 

@@ -1071,6 +1071,119 @@ export const RULES: readonly Rule[] = [
       'make them faster or set maxTimeMS so the server stops them itself.',
   },
 
+  /* ---------------------------------------------- injected on the lab, 2026-10-06 ---- */
+  /*
+   * Four counters that read zero on every real capture held -- the lab, an idle Atlas M10 over
+   * 22 days, a busy 8.0 support bundle and a customer replica set -- so a threshold could not
+   * be read off them. Each fault was injected on a PSMDB 8.0.29 replica set at 1-second FTDC,
+   * for three minutes at a low rate and three at a high one, and the rule is the one that
+   * caught both through try-rule.ts while all four real captures still gave 0 findings at
+   * every threshold tried.
+   *
+   * `asserts.user` was tried the same way and is not a rule. It counts every user-facing error,
+   * so it rose with the maxTimeMS kills and the rejected connections as well as with the
+   * duplicate keys, and on the customer replica set it ran at 50 to 400 a second for hours,
+   * 1,100 to 1,350 in the daily 07:00 burst that `client-disconnect-kills` already reports.
+   */
+
+  {
+    id: 'maxtime-kills',
+    title: 'Operations were stopped by their own time limit',
+    severity: 'warning',
+    // An operation that ran past the maxTimeMS its client set. The limit did its job, but
+    // every one is work done and thrown away, and a steady stream of them means the queries
+    // no longer fit the time they were given.
+    metric: 'rate(serverStatus.metrics.operation.killedDueToMaxTimeMSExpired)',
+    op: '>=',
+    // One a second for a minute. Injected: full scans of 1M documents with maxTimeMS(5), at
+    // 1/s and at 20/s. Both phases fired (320 s in breach, peak 22/s), and a 30-second burst
+    // at 20/s did not, which is what the 60 s sustain is for: an application that uses
+    // maxTimeMS on purpose will see the odd kill, and that is not the finding. The four real
+    // captures held (lab, Atlas M10, an 8.0 bundle, a customer set) gave 0 at 0.2/s and up.
+    threshold: 1,
+    sustainMs: 60_000,
+    toleranceMs: 30_000,
+    unit: 'per-sec',
+    what: 'Operations kept running past the time limit (maxTimeMS) their client gave them, so the server stopped them after doing the work and returned nothing.',
+    check:
+      'Find the operations in the slow query log around this time: the ones ending with ' +
+      'MaxTimeMSExpired. Either the query got slower (a missing index, a plan change, more data) ' +
+      'or the server was too busy to finish it in time, and the other findings at the same ' +
+      'moment usually say which.',
+  },
+
+  {
+    id: 'aborted-transactions',
+    title: 'Transactions were being aborted',
+    severity: 'warning',
+    // Aborted by the client, by a write conflict, or by transactionLifetimeLimitSeconds. All
+    // three look the same here, and all three mean the work inside them was rolled back.
+    metric: 'rate(serverStatus.transactions.totalAborted)',
+    op: '>=',
+    // One a second for a minute. Injected: start a transaction, insert, abort, at 1/s and at
+    // 50/s (the lab reached 17/s). Both phases fired, 305 s in breach, peak 31/s. The four
+    // real captures held gave 0 at 0.2/s and up.
+    threshold: 1,
+    sustainMs: 60_000,
+    toleranceMs: 30_000,
+    unit: 'per-sec',
+    what: 'Transactions were being rolled back at a steady rate, so the writes inside them were done and then undone.',
+    check:
+      'Look for WriteConflict and TransactionExceededLifetimeLimitSeconds in the mongod log. ' +
+      'Conflicts mean transactions touching the same documents at the same time; lifetime ' +
+      'aborts mean transactions held open too long. An application that aborts on purpose ' +
+      'shows neither.',
+  },
+
+  {
+    id: 'rejected-connections',
+    title: 'The server was turning clients away',
+    severity: 'critical',
+    // Connections refused because the server was already at net.maxIncomingConnections. Every
+    // one is a client that could not reach the database at all.
+    metric: 'rate(serverStatus.connections.rejected)',
+    op: '>=',
+    // One a second for a minute. Injected: node2 restarted with maxIncomingConnections 40,
+    // filled, then new connections at 1/s and at 20/s. Both phases fired on node2 and only on
+    // node2, 311 s in breach, peak 22/s. The four real captures held gave 0 at 0.2/s and up.
+    threshold: 1,
+    sustainMs: 60_000,
+    toleranceMs: 30_000,
+    unit: 'per-sec',
+    what: 'The server was refusing new connections because it had reached its connection limit, so some clients could not connect at all.',
+    check:
+      'Compare the connection count with net.maxIncomingConnections and the file descriptor ' +
+      'limit. Then look at the clients: a pool sized too large across many application ' +
+      'instances, or connections opened and never closed, fill the limit long before the ' +
+      'server is busy.',
+  },
+
+  {
+    id: 'cursor-timeouts',
+    title: 'Idle cursors were timing out',
+    severity: 'warning',
+    // Cursors the server closed because nobody asked for the next batch within
+    // cursorTimeoutMillis (10 minutes by default). Since 4.4.8 a cursor opened inside a
+    // session is closed with its session instead, and drivers always open one, so this counts
+    // only cursors opened outside a session -- the lab had to open them on a raw connection.
+    metric: 'rate(serverStatus.metrics.cursor.timedOut)',
+    op: '>=',
+    // One a second, held for 20 s rather than the usual 60. The server sweeps for idle cursors
+    // every 4 seconds, so the counter moves once per sweep and the rate reads 0, 0, 0, 80:
+    // only those seconds count towards the sustain. Injected at 1/s and at 20/s for three
+    // minutes each, a 60 s sustain caught neither; 20 s caught both, 92 s in breach, peak
+    // 140/s, and still nothing on the four real captures.
+    threshold: 1,
+    sustainMs: 20_000,
+    toleranceMs: 30_000,
+    unit: 'per-sec',
+    what: 'The server kept closing cursors that clients had opened and then stopped reading, which usually means an application that abandons its query results half way.',
+    check:
+      'Find which client opens cursors outside a session: an old driver, or a tool that talks ' +
+      'to the server on a raw connection. Each one held memory and a snapshot for the whole ' +
+      'timeout before the server reclaimed it.',
+  },
+
   /* ------------------------------------------------------ pinned content ---- */
   // Cache pressure and pinned content look almost identical and have opposite remedies, which
   // is why this is a rule of its own rather than a note on `cache-full`.

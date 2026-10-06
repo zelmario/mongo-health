@@ -351,6 +351,10 @@ MEASURES = {
     "sorts-spilling-burst":    ("Sorts spilling to disk", "per second", True),
     "client-disconnect-kills": ("Operations killed after the client left", "per second", True),
     "pages-read-into-cache":   ("Pages read into the cache", "per second", True),
+    "maxtime-kills":           ("Operations stopped by maxTimeMS", "per second", True),
+    "aborted-transactions":    ("Transactions aborted", "per second", True),
+    "rejected-connections":    ("Connections refused", "per second", True),
+    "cursor-timeouts":         ("Idle cursors timed out", "per second", True),
     "rolling-restart":         ("Uptime", "seconds", False),
     "member-restarted":        ("Uptime", "seconds", False),
 }
