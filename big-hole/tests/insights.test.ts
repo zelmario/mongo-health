@@ -284,6 +284,27 @@ describe('detecting across captures', () => {
     expect(findings).toHaveLength(1);
   });
 
+  it('keeps only the episodes that had a queue inside them, wherever they fall', async () => {
+    // Three episodes 100 s apart. The queue is up between the first two, which is neither of
+    // them, and inside the third. Each episode is looked up where it starts rather than by a
+    // pass over the whole series, and that must not change which ones survive.
+    const t = at(...Array.from({ length: 40 }, (_, i) => i * 10));
+    const out = new Float64Array(40).fill(0);
+    const queue = new Float64Array(40).fill(0);
+    for (const start of [0, 10, 20]) for (let k = start; k < start + 5; k++) out[k] = 80;
+    queue[7] = 3;   // between the first and second episode
+    queue[23] = 3;  // inside the third
+    const source = fakeSource({
+      [OUT]: { t, min: out, max: out },
+      [QUEUE]: { t, min: new Float64Array(40), max: queue },
+    });
+    const [finding, ...rest] = await detect(source, [capture('c0', 'n', SAT_PATHS)], [saturated], {});
+    expect(rest).toHaveLength(0);
+    expect(finding!.episodes).toBe(1);
+    expect(finding!.firstMs).toBe(200_000);
+    expect(finding!.lastMs).toBe(240_000);
+  });
+
   const slowWire: Rule = {
     id: 'slow-wire-not-server',
     title: 'The server is answering fast; the time is going somewhere else',

@@ -86,16 +86,16 @@ def sync_runner(repo: Path) -> Path:
     return script
 
 
-# Half an hour for an hourly round, which decodes the last two days. A run with no `since` is a
-# full re-analysis and decodes everything held, so its cost grows with retention: a --redo of
-# Cluster1 (20 days, 1.2 GB) ran past the half hour on 2026-10-05 and left the cluster reading
-# "the latest analysis failed". Still bounded, so a hung engine cannot hold the round lock for
-# ever.
+# Half an hour for an hourly round, which decodes the last two days, and for each slice of a
+# re-analysis (see run_redo). A run with no `since` decodes everything held: only a cluster
+# with less than one slice of history gets one. Still bounded, so a hung engine cannot hold the
+# round lock for ever.
 ROUND_TIMEOUT, FULL_TIMEOUT = 1800, 4 * 3600
 
 
 def run_engine(ftdc: Path, since: str | None, timeout: int | None = None,
-               daily: Path | None = None, progress: Path | None = None) -> dict:
+               daily: Path | None = None, progress: Path | None = None,
+               until: str | None = None) -> dict:
     """Invoke the runner inside Big Hole and return its JSON.
 
     stdout is the JSON and stderr is for humans; they are kept apart so that decode progress
@@ -110,6 +110,8 @@ def run_engine(ftdc: Path, since: str | None, timeout: int | None = None,
     cmd = ["npx", "vite-node", "tools/analyze.ts", "--", str(ftdc)]
     if since:
         cmd += ["--since", since]
+    if until:
+        cmd += ["--until", until]
     if daily is not None:
         cmd += ["--daily", str(daily)]
     if progress is not None:
@@ -121,6 +123,60 @@ def run_engine(ftdc: Path, since: str | None, timeout: int | None = None,
     if r.returncode != 0:
         raise RuntimeError(f"engine failed ({r.returncode}): {r.stderr.strip()[-400:]}")
     return json.loads(r.stdout)
+
+
+# A full re-analysis walks the history a week at a time. In one piece it held everything of
+# every member in memory at once: 5.2 GB for Cluster1's 22 days, with the host in swap, and a
+# 90-day retention would not have fitted in 16 GB. A week of three members is about 2 GB, and
+# each slice is a run of its own, timed like a round.
+REDO_SLICE = timedelta(days=7)
+# Each slice after the first starts this long before its boundary, and the slice before it
+# keeps only what ended before that. Every finding is kept by exactly one slice, and one that
+# runs up to a boundary is judged by the next slice, which reads a day back and sees it whole.
+SLICE_LEAD = timedelta(hours=1)
+
+
+def iso(t: datetime) -> str:
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def redo_slices(ftdc: Path, until: datetime) -> list[tuple[datetime, datetime]]:
+    """Week-long [start, end) slices from midnight of the oldest file held, stopping short of
+    the last week: that one is the closing run's, which reads up to the present."""
+    opened = [t for t in (timestamp_of(f.name) for f in ftdc.rglob("metrics.*")) if t]
+    if not opened:
+        return []
+    bounds = [min(opened).replace(hour=0, minute=0, second=0, microsecond=0)]
+    while bounds[-1] + REDO_SLICE < until:
+        bounds.append(bounds[-1] + REDO_SLICE)
+    return list(zip(bounds, bounds[1:]))
+
+
+def run_redo(ftdc: Path, base: Path, verbose: bool = True) -> dict:
+    """Everything held, re-analysed slice by slice, then a closing run like a round's.
+
+    The closing run is the one whose nodes, percentiles and charts the summary is built from:
+    by then the slices have rewritten every day, and it merges them as a round does. What the
+    slices contribute is their findings.
+    """
+    slices = redo_slices(ftdc, datetime.now(timezone.utc))
+    kept: list[dict] = []
+    for k, (start, end) in enumerate(slices):
+        t0 = time.monotonic()
+        since = start if k == 0 else start - SLICE_LEAD
+        part = run_engine(ftdc, iso(since), until=iso(end), daily=base / "daily",
+                          progress=base / PROGRESS)
+        cut = (end - SLICE_LEAD).timestamp() * 1000
+        mine = [f for f in part["findings"] if f["toMs"] < cut]
+        kept += mine
+        if verbose:
+            print(f"  slice {k + 1}/{len(slices)} {start:%d %b}-{end:%d %b}: "
+                  f"{len(mine)} finding(s), {time.monotonic() - t0:.0f}s")
+    closing = slices[-1][1] - SLICE_LEAD if slices else None
+    out = run_engine(ftdc, iso(closing) if closing else None, daily=base / "daily",
+                     progress=base / PROGRESS)
+    out["findings"] = kept + out["findings"]
+    return out
 
 
 def finding_id(cluster_id: str, f: dict) -> str:
@@ -326,7 +382,12 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
         # newest first, window by window. Read from `since`, the engine took them as already
         # summarised and judged Cluster1 on 43 hours of its 20 days. Read from the start.
         since = None
-    out = run_engine(ftdc, since, daily=base / "daily", progress=base / PROGRESS)
+    if since is None:
+        # A re-analysis, a first capture, or files that arrived older than the last analysis:
+        # everything held, so a slice at a time.
+        out = run_redo(ftdc, base, verbose)
+    else:
+        out = run_engine(ftdc, since, daily=base / "daily", progress=base / PROGRESS)
 
     stamp = now()
     nodes = out["nodes"]
@@ -365,6 +426,8 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
               + advice
               + ahead):
         fid = finding_id(cluster_id, f)
+        if fid in produced:
+            continue  # two slices of a re-analysis can both see an event that ends on a boundary
         produced.add(fid)
         if fid in already:
             if redo:

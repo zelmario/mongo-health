@@ -413,10 +413,19 @@ export async function detect(
           // what the condition asks about.
           const reach = rule.during.op === '<=' ? other.min : other.max;
           const { op, threshold } = rule.during;
+          // From the episode's first sample, found by bisection, not from the start of the
+          // series: over a month held that was every sample once per episode, a few hundred
+          // passes over two million samples for one rule on one node.
+          const t = series.t;
           episodes = episodes.filter((e) => {
-            for (let i = 0; i < series.t.length; i++) {
-              const at = series.t[i]!;
-              if (at < e.fromMs || at > e.toMs) continue;
+            let lo = 0;
+            let hi = t.length;
+            while (lo < hi) {
+              const mid = (lo + hi) >>> 1;
+              if (t[mid]! < e.fromMs) lo = mid + 1;
+              else hi = mid;
+            }
+            for (let i = lo; i < t.length && t[i]! <= e.toMs; i++) {
               const v = reach[i]!;
               if (!Number.isNaN(v) && (op === '<=' ? v <= threshold : v >= threshold)) return true;
             }
@@ -435,19 +444,11 @@ export async function detect(
           else grupos[grupos.length - 1]!.push(actual);
         }
 
-        for (const grupo of grupos) {
-        let worst = grupo[0]!;
-        let totalMs = 0;
-        let peak = grupo[0]!.peak;
-        for (const episode of grupo) {
-          totalMs += episode.inStateMs;
-          if (episode.inStateMs > worst.inStateMs) worst = episode;
-          peak = rule.op === '<=' ? Math.min(peak, episode.peak) : Math.max(peak, episode.peak);
-        }
-
         // For a metric that echoes an event, count the events rather than the samples: each
         // distinct value the metric takes is one checkpoint, one flush, one of whatever it
         // reports on. The samples in between are the same event still being displayed.
+        // Counted once per series, not once per group: the count is the same for every group,
+        // and recounting it was another full pass over the history per incident.
         let occurrences: number | undefined;
         let observed: number | undefined;
         if (rule.echoesAnEvent === true) {
@@ -463,6 +464,16 @@ export async function detect(
             const breaches = rule.op === '<=' ? value <= rule.threshold : value >= rule.threshold;
             if (breaches) occurrences++;
           }
+        }
+
+        for (const grupo of grupos) {
+        let worst = grupo[0]!;
+        let totalMs = 0;
+        let peak = grupo[0]!.peak;
+        for (const episode of grupo) {
+          totalMs += episode.inStateMs;
+          if (episode.inStateMs > worst.inStateMs) worst = episode;
+          peak = rule.op === '<=' ? Math.min(peak, episode.peak) : Math.max(peak, episode.peak);
         }
 
         found.push({

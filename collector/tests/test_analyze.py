@@ -289,6 +289,39 @@ def test_the_engine_is_given_the_daily_directory(tmp_path: Path, monkeypatch):
     assert seen["daily"] == tmp_path / "data/prod/daily"
 
 
+def test_a_reanalysis_walks_the_history_a_week_at_a_time(tmp_path: Path):
+    """In one piece, Cluster1's 22 days took 5.2 GB and put the host in swap."""
+    setup(tmp_path)
+    utc = timezone.utc
+    slices = analyze.redo_slices(tmp_path / "data/prod/ftdc", datetime(2026, 8, 30, tzinfo=utc))
+    assert slices == [(datetime(2026, 8, d, tzinfo=utc), datetime(2026, 8, d + 7, tzinfo=utc))
+                      for d in (7, 14, 21)]
+
+
+def test_each_finding_is_kept_by_one_slice_and_seen_whole(tmp_path: Path, monkeypatch):
+    """An incident that runs up to a boundary is cut short in the slice before it. That slice
+    leaves it to the next, which starts an hour earlier and reads a day back."""
+    utc = timezone.utc
+    week1, week2 = datetime(2026, 8, 7, tzinfo=utc), datetime(2026, 8, 14, tzinfo=utc)
+    boundary = int(week2.timestamp() * 1000)
+    early = dict(a_finding(worst=boundary - 50 * HOUR), toMs=boundary - 49 * HOUR)
+    cut_short = dict(a_finding(worst=boundary - HOUR // 2), toMs=boundary)
+    whole = dict(cut_short, toMs=boundary + 2 * HOUR)
+    calls = []
+
+    def engine(ftdc, since, until=None, **kw):
+        calls.append((since, until))
+        return engine_output(findings=[early, cut_short] if until else [whole])
+
+    monkeypatch.setattr(analyze, "run_engine", engine)
+    monkeypatch.setattr(analyze, "redo_slices", lambda ftdc, until: [(week1, week2)])
+    out = analyze.run_redo(tmp_path, tmp_path, verbose=False)
+
+    assert calls == [("2026-08-07T00:00:00Z", "2026-08-14T00:00:00Z"),
+                     ("2026-08-13T23:00:00Z", None)]
+    assert out["findings"] == [early, whole]
+
+
 def test_the_status_page_counts_gaps_over_everything_held(tmp_path: Path, monkeypatch):
     """`gaps` only covers the two days a run decodes; the page promises the whole history."""
     spec = setup(tmp_path)

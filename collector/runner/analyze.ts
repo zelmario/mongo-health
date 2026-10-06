@@ -30,8 +30,11 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync,
          unlinkSync, writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { spawn } from 'node:child_process';
+import { availableParallelism, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createInterface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
 import { decodeFTDC, readMetadata } from '../src/ftdc/index.js';
 import { NodeFileStore } from '../src/data/nodeFileStore.js';
@@ -58,14 +61,13 @@ if (root === undefined) {
   process.exit(1);
 }
 const sinceMs = argv.includes('--since') ? Date.parse(argv[argv.indexOf('--since') + 1]!) : 0;
-// Upper bound for the judged window. Only calibration passes it: production always wants
-// "everything since the last run". Without it a window is open-ended, which makes it
-// impossible to grade a stretch of the past without dragging in everything that came after.
+// Upper bound for the judged window, for one slice of a full re-analysis. Rounds never pass it:
+// they want "everything since the last run". With it, this run decodes only the files that
+// reach into [since - a day, until), judges up to `until`, and rewrites only the whole days
+// before it. A re-analysis of Cluster1 in one piece held 22 days of three members in memory,
+// 5.2 GB, and pushed the host into swap; at 90 days it would not have fitted at all.
 const untilMs = argv.includes('--until') ? Date.parse(argv[argv.indexOf('--until') + 1]!) : 0;
-// Never with `--until`: a calibration pass judges a stretch of the past, and writing summaries
-// of it would overwrite days a production run had summarised with more data.
-const dailyDir = argv.includes('--daily') && untilMs === 0
-  ? argv[argv.indexOf('--daily') + 1]! : undefined;
+const dailyDir = argv.includes('--daily') ? argv[argv.indexOf('--daily') + 1]! : undefined;
 // Where to write how far the decode has got, for the page's progress bar. Separate from stdout,
 // which is the result and nothing else.
 const progressPath = argv.includes('--progress')
@@ -845,6 +847,167 @@ function writeJson(path: string, value: unknown): void {
   renameSync(`${path}.tmp`, path);
 }
 
+/* ------------------------------------------------------------------- decoding ---- */
+
+/** What decoding a member's files learnt from their metadata, beyond the samples themselves. */
+interface Decoded {
+  hostname: string | undefined;
+  mongoVersion: string | undefined;
+  dbPath: string | undefined;
+  config: NodeConfig | undefined;
+  versions: Array<{ atMs: number; from: string; to: string }>;
+}
+
+/** One member's decode, as handed to a child process. */
+interface DecodeJob {
+  tmpDir: string;
+  captureId: string;
+  node: string;
+  files: string[];
+  /** The version before the first file, to see an upgrade at its start. */
+  seedVersion: string | undefined;
+  /** Name and version from the stored days, for files that carried no metadata. */
+  fallbackHostname: string | undefined;
+  fallbackVersion: string | undefined;
+  out: string;
+}
+
+/** A member's files into the store, under `captureId`. */
+async function decodeNode(job: DecodeJob, onFile: () => void): Promise<Decoded> {
+  const { node } = job;
+  const store = new NodeFileStore(job.tmpDir);
+  const writer = await CaptureWriter.create(store, { captureId: job.captureId, sourceFile: node });
+  let hostname: string | undefined;
+  let mongoVersion: string | undefined;
+  let dbPath: string | undefined;
+  let config: NodeConfig | undefined;
+  // The version of each file in turn, to see an upgrade: Atlas moved Cluster1 from 8.0.32 to
+  // 8.0.34 on 30 Sep 2026 and nothing said so, because only the first file's was kept.
+  const versions: Array<{ atMs: number; from: string; to: string }> = [];
+  let lastVersion = job.seedVersion;
+
+  for (const file of job.files) {
+    const bytes = new Uint8Array(readFileSync(file));
+    // The configuration from the NEWEST file, unlike the name: after a resize the oldest
+    // metadata describes a server that no longer exists.
+    let meta: ReturnType<typeof readMetadata> | undefined;
+    try {
+      meta = readMetadata(bytes);
+    } catch {
+      /* no metadata in this file */
+    }
+    if (meta?.version) {
+      const opened = fileOpenedMs(file);
+      if (lastVersion !== undefined && meta.version !== lastVersion && opened !== undefined) {
+        versions.push({ atMs: opened, from: lastVersion, to: meta.version });
+      }
+      lastVersion = meta.version;
+      // The newest file's, unlike the hostname: the version a member runs now is the one the
+      // end-of-life recommendation has to judge.
+      mongoVersion = meta.version;
+    }
+    if (meta?.doc) {
+      try {
+        config = configOf(meta.doc);
+      } catch (e) {
+        // Said out loud: swallowed, it looked exactly like a server that reports nothing.
+        console.error(`  note: ${node}: configuration unreadable: ${(e as Error).message}`);
+      }
+    }
+    if (hostname === undefined) {
+      try {
+        const meta = readMetadata(bytes);
+        hostname = meta?.hostname;
+        mongoVersion ??= meta?.version;
+        dbPath = (meta?.doc as any)?.getCmdLineOpts?.parsed?.storage?.dbPath ?? dbPath;
+      } catch {
+        /* a file without metadata is not a problem: it comes in the next one */
+      }
+    }
+    try {
+      for (const chunk of decodeFTDC(bytes)) await writer.addChunk(chunk);
+    } catch (e) {
+      // A half-written metrics.interim is normal: mongod was writing it when we copied it.
+      // It must not sink the rest of the node.
+      console.error(`  note: ${node}/${file.split('/').pop()}: ${(e as Error).message}`);
+    }
+    onFile();
+  }
+
+  // The label every finding id is built from. If the files this run read carried no metadata,
+  // the name has to come from the stored days: falling back to the directory name would
+  // give the same node a new id, and every finding about it would be sent again.
+  if (hostname === undefined) {
+    hostname = job.fallbackHostname;
+    mongoVersion ??= job.fallbackVersion;
+  }
+
+  await writer.finish({
+    ...(hostname !== undefined ? { hostname } : {}),
+    ...(mongoVersion !== undefined ? { mongoVersion } : {}),
+  });
+  return { hostname, mongoVersion, dbPath, config, versions };
+}
+
+/*
+ * One member per process, up to four at once. Decoding is most of a run and it went member
+ * after member on an eight-core host: 6.5 minutes each for Cluster1's 22 days, 20 of the 32
+ * minutes of a re-analysis. The store is a directory per member, so the children share it
+ * without touching each other, and the checks still run here, over all of them.
+ */
+const PARALLEL_DECODES = Math.max(1, Math.min(4, availableParallelism() - 1));
+const SELF = fileURLToPath(import.meta.url);
+
+/** The child's side: `--decode-one <job.json>`. Says "file" on stdout after each file. */
+const decodeOne = argv.includes('--decode-one') ? argv[argv.indexOf('--decode-one') + 1] : undefined;
+if (decodeOne !== undefined) {
+  const job = JSON.parse(readFileSync(decodeOne, 'utf8')) as DecodeJob;
+  const decoded = await decodeNode(job, () => process.stdout.write('file\n'));
+  writeFileSync(job.out, JSON.stringify(decoded));
+  process.exit(0);
+}
+
+function decodeInChild(job: DecodeJob, onFile: () => void): Promise<Decoded> {
+  const jobPath = `${job.out}.job`;
+  writeFileSync(jobPath, JSON.stringify(job));
+  // The local binary when there is one: through npx each child spent seven seconds starting.
+  const local = join(process.cwd(), 'node_modules', '.bin', 'vite-node');
+  const [cmd, pre] = existsSync(local) ? [local, [] as string[]] : ['npx', ['vite-node']];
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, [...pre, SELF, '--', '--decode-one', jobPath],
+                        { stdio: ['ignore', 'pipe', 'inherit'] });
+    createInterface({ input: child.stdout! }).on('line', onFile);
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`decoding ${job.node} failed (exit ${code})`));
+        return;
+      }
+      resolve(JSON.parse(readFileSync(job.out, 'utf8')) as Decoded);
+    });
+  });
+}
+
+/** Every job, in parallel when there is more than one. In order, `undefined` where none. */
+async function decodeAll(jobs: Array<DecodeJob | undefined>,
+                         onFile: (node: string) => void): Promise<Array<Decoded | undefined>> {
+  const results: Array<Decoded | undefined> = new Array(jobs.length).fill(undefined);
+  const real = jobs.filter((j) => j !== undefined).length;
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < jobs.length) {
+      const k = next++;
+      const job = jobs[k];
+      if (job === undefined) continue;
+      results[k] = real > 1
+        ? await decodeInChild(job, () => onFile(job.node))
+        : await decodeNode(job, () => onFile(job.node));
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(PARALLEL_DECODES, Math.max(real, 1)) }, worker));
+  return results;
+}
+
 const nodes = readdirSync(root)
   .filter((n) => statSync(join(root, n)).isDirectory())
   .sort();
@@ -872,8 +1035,10 @@ if (dailyDir !== undefined) {
   }
 }
 // From midnight of the day before the detection window opens, so that every day this run
-// rewrites is a whole day and not the tail of one.
-const decodeFrom = dailyValid && sinceMs > 0 ? dayStart(sinceMs - ANALYSIS_WINDOW_MS) : 0;
+// rewrites is a whole day and not the tail of one. A slice decodes only its own stretch even
+// when the summaries are being rebuilt: the slices before it have written the days before it.
+const decodeFrom = (dailyValid || untilMs > 0) && sinceMs > 0
+  ? dayStart(sinceMs - ANALYSIS_WINDOW_MS) : 0;
 const electionsFrom = decodeFrom > 0 ? sinceMs - ANALYSIS_WINDOW_MS : 0;
 
 const tmpDir = await mkdtemp(join(tmpdir(), 'collector-'));
@@ -886,7 +1051,16 @@ const captures: DetectCapture[] = [];
 // than `decodeFrom`. That is a node that stopped, and it still has a history.
 const plan = nodes.map((node) => {
   const held = metricsFilesIn(join(root, node));
-  return { held, files: held.length === 0 ? [] : filesFrom(held, decodeFrom) };
+  let files = held.length === 0 ? [] : filesFrom(held, decodeFrom);
+  // A slice stops at the first file opened after it ends. Without a name to date it by (the
+  // interim file) a file is the newest, and is read only by the slice that reaches the present.
+  if (untilMs > 0) {
+    files = files.filter((f) => {
+      const start = fileStart(f);
+      return start !== null ? start < untilMs : false;
+    });
+  }
+  return { held, files };
 });
 const totalFiles = plan.reduce((n, p) => n + p.files.length, 0);
 let doneFiles = 0;
@@ -900,92 +1074,48 @@ function progress(node: string | null, stage: 'decoding' | 'summarising' | 'chec
 }
 
 try {
+  progress(null, 'decoding');
+  const jobs = nodes.map((node, i): DecodeJob | undefined => {
+    const { files } = plan[i]!;
+    if (files.length === 0) return undefined;  // none held, or none in this slice
+    const days = dailyDir !== undefined ? readDays(join(dailyDir, node)) : [];
+    return {
+      tmpDir,
+      captureId: `n${i}`,
+      node,
+      files,
+      // The last day before this run's, not the newest held: a re-analysis slice starting on
+      // 12 Sep read 8.0.32 against Cluster1's 8.0.34 of today and reported an upgrade that
+      // had not happened yet. A round the day after an upgrade did the same, backwards.
+      seedVersion: decodeFrom > 0
+        ? days.filter((d) => Date.parse(`${d.day}T00:00:00Z`) < decodeFrom).at(-1)?.version
+        : undefined,
+      fallbackHostname: days.at(-1)?.hostname,
+      fallbackVersion: days.at(-1)?.version,
+      out: join(tmpDir, `n${i}.decoded.json`),
+    };
+  });
+  const decodedAll = await decodeAll(jobs, (node) => {
+    doneFiles++;
+    progress(node, 'decoding');
+  });
+
   for (let i = 0; i < nodes.length; i++) {
     const node = nodes[i]!;
     const { held, files } = plan[i]!;
-    if (held.length === 0) continue;
-    progress(node, 'decoding');
+    if (files.length === 0) continue;  // none held, or none in this slice
+    progress(node, 'summarising');
     const nodeDaily = dailyDir !== undefined ? join(dailyDir, node) : undefined;
     // What every whole-history read below is limited to. Everything, without `--daily`.
     const scope = (decodeFrom > 0 ? { from: decodeFrom } : {}) as SeriesQuery;
 
     const captureId = `n${i}`;
-    const writer = await CaptureWriter.create(store, { captureId, sourceFile: node });
-    let hostname: string | undefined;
-    let mongoVersion: string | undefined;
-    let dbPath: string | undefined;
-    let config: NodeConfig | undefined;
-    // The version of each file in turn, to see an upgrade: Atlas moved Cluster1 from 8.0.32 to
-    // 8.0.34 on 30 Sep 2026 and nothing said so, because only the first file's was kept.
-    const versions: Array<{ atMs: number; from: string; to: string }> = [];
-    let lastVersion: string | undefined =
-      decodeFrom > 0 && nodeDaily !== undefined ? readDays(nodeDaily).at(-1)?.version : undefined;
-
-    for (const file of files) {
-      const bytes = new Uint8Array(readFileSync(file));
-      // The configuration from the NEWEST file, unlike the name: after a resize the oldest
-      // metadata describes a server that no longer exists.
-      let meta: ReturnType<typeof readMetadata> | undefined;
-      try {
-        meta = readMetadata(bytes);
-      } catch {
-        /* no metadata in this file */
-      }
-      if (meta?.version) {
-        const opened = fileOpenedMs(file);
-        if (lastVersion !== undefined && meta.version !== lastVersion && opened !== undefined) {
-          versions.push({ atMs: opened, from: lastVersion, to: meta.version });
-        }
-        lastVersion = meta.version;
-        // The newest file's, unlike the hostname: the version a member runs now is the one the
-        // end-of-life recommendation has to judge.
-        mongoVersion = meta.version;
-      }
-      if (meta?.doc) {
-        try {
-          config = configOf(meta.doc);
-        } catch (e) {
-          // Said out loud: swallowed, it looked exactly like a server that reports nothing.
-          console.error(`  note: ${node}: configuration unreadable: ${(e as Error).message}`);
-        }
-      }
-      if (hostname === undefined) {
-        try {
-          const meta = readMetadata(bytes);
-          hostname = meta?.hostname;
-          mongoVersion ??= meta?.version;
-          dbPath = (meta?.doc as any)?.getCmdLineOpts?.parsed?.storage?.dbPath ?? dbPath;
-        } catch {
-          /* a file without metadata is not a problem: it comes in the next one */
-        }
-      }
-      try {
-        for (const chunk of decodeFTDC(bytes)) await writer.addChunk(chunk);
-      } catch (e) {
-        // A half-written metrics.interim is normal: mongod was writing it when we copied it.
-        // It must not sink the rest of the node.
-        console.error(`  note: ${node}/${file.split('/').pop()}: ${(e as Error).message}`);
-      }
-      doneFiles++;
-      progress(node, 'decoding');
-    }
-    progress(node, 'summarising');
-
-    // The label every finding id is built from. If the files this run read carried no metadata,
-    // the name has to come from the stored days: falling back to the directory name would
-    // give the same node a new id, and every finding about it would be sent again.
-    if (hostname === undefined && nodeDaily !== undefined) {
-      const last = readDays(nodeDaily).at(-1);
-      hostname = last?.hostname;
-      mongoVersion ??= last?.version;
-    }
-
-    const manifest = await writer.finish({
-      ...(hostname !== undefined ? { hostname } : {}),
-      ...(mongoVersion !== undefined ? { mongoVersion } : {}),
-    });
+    const decoded = decodedAll[i]!;
+    let { hostname, mongoVersion } = decoded;
+    const { dbPath, config, versions } = decoded;
     const reader = await CaptureReader.open(store, captureId);
     readers.set(captureId, reader);
+    const manifest = reader.manifest;
 
     const paths = new Set(reader.catalog.map((c) => c.path));
     captures.push({ id: captureId, label: hostname ?? node, paths });
@@ -1241,6 +1371,8 @@ try {
       const firstPath = reader.catalog[0]?.path;
       const clock = firstPath !== undefined ? (await reader.getSeries(firstPath, scope)).t : new Float64Array();
       for (const [day, from, to] of dayRanges(clock)) {
+        // A slice holds the start of the day it ends in, not all of it: the next one writes it.
+        if (untilMs > 0 && day + DAY_MS > untilMs) continue;
         const summary: DaySummary = {
           format: DAILY_FORMAT,
           day: dayName(day),
@@ -1371,16 +1503,27 @@ try {
   // The baseline is unaffected: it accumulates per run from percentiles already computed, and
   // never re-reads history.
   const windowFrom = sinceMs > 0 ? sinceMs - ANALYSIS_WINDOW_MS : 0;
-  const windowQuery = (windowFrom > 0 ? { from: windowFrom } : {}) as SeriesQuery;
+  const windowQuery = (windowFrom > 0
+    ? (untilMs > 0 ? { from: windowFrom, to: untilMs } : { from: windowFrom })
+    : {}) as SeriesQuery;
   // Rules written against `{dataMount}` are resolved member by member, each against the mount
   // holding its own data; everything else runs across all members at once, as before.
   const perMember = RULES.filter((r) => r.metric.includes('{dataMount}'));
-  const fromRules = [
-    ...await detect(source, captures, RULES.filter((r) => !perMember.includes(r)), windowQuery),
-    ...(await Promise.all(captures.map((c) => detect(source, [c], perMember.map((r) => ({
+  //
+  // One member at a time. Findings are per member anyway, and `detect` holds every series its
+  // rules read at full resolution until it is done: three members at once was 3.5 GB for a
+  // nine-day slice of Cluster1, against about 500 MB while decoding.
+  const fromRules: Finding[] = [];
+  for (const c of captures) {
+    fromRules.push(...await detect(source, [c], RULES.filter((r) => !perMember.includes(r)),
+                                   windowQuery));
+    fromRules.push(...await detect(source, [c], perMember.map((r) => ({
       ...r, metric: withDataMount(r.metric, dataMounts.get(c.id)),
-    })), windowQuery)))).flat(),
-  ];
+    })), windowQuery));
+  }
+  // The order `detect` gives across members: worst first, then earliest.
+  const rank = { critical: 0, warning: 1, info: 2 } as const;
+  fromRules.sort((a, b) => rank[a.severity] - rank[b.severity] || a.firstMs - b.firstMs);
   const findings = [...fromRules, ...gapFindings(nodeSummaries), ...electionFindings(nodeSummaries),
                     ...alarmFindings(nodeSummaries), ...changeFindings(nodeSummaries),
                     ...versionFindings(nodeSummaries), ...restartFindings(nodeSummaries),
