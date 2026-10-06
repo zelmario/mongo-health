@@ -1092,17 +1092,26 @@ label.pick input { margin: 0; }
 .from-disk .needs-server { display: none; }
 /* Printed, which in practice means saved as PDF to send to somebody. The page keeps its dark
    colours: the charts are drawn on the panel colour, and on white paper each one became a dark
-   slab. Forms and the button go, since nobody can submit anything from a PDF; a card or a
-   chart is never cut across two pages. */
+   slab. Forms and the button go, since nobody can submit anything from a PDF. A chart is never
+   cut across two pages, but a finding is: kept whole, each one is 40% of a page, and every one
+   that did not fit left the rest of the page blank -- 36 pages for `test`, a third of them
+   empty. What has to stay together is a heading or a timestamp with what follows it. */
 header.top button.save-pdf { margin-left: 0.8rem; }
 @media print {
   @page { margin: 0; }
   html, body { -webkit-print-color-adjust: exact; print-color-adjust: exact;
                background: var(--ground); }
-  .wrap { max-width: none; padding: 12mm 14mm; }
+  /* Cloned, so every page gets the top and bottom padding and not just the first and last:
+     a margin on @page would print white around the dark page. */
+  .wrap { max-width: none; padding: 12mm 14mm; box-decoration-break: clone;
+          -webkit-box-decoration-break: clone; }
   .save-pdf, .needs-server, .zoom, form { display: none !important; }
-  .finding, .card, img.shape, figure, tr { break-inside: avoid; }
-  h1, h2, h3 { break-after: avoid; }
+  .card, img.shape, figure, tr, .facts, .recurrence { break-inside: avoid; }
+  h1, h2, h3, .stamp, .finding .head, .finding .head + p { break-after: avoid; }
+  /* A grid row does not split across pages in Chrome: a moment with two signals, taller
+     than what was left of the page, moved whole and left a blank page behind it. */
+  ol.axis { display: block; }
+  ol.axis > li + li { margin-top: 1.6rem; }
 }
 form.inline { display: inline; margin: 0; }
 .fixed-note { margin: 1.5rem 0; border-left: 3px solid var(--ok); }
@@ -1266,13 +1275,27 @@ document.addEventListener('keydown', (e) => {
 
 /* The browser's own print dialog, with "Save as PDF" as the destination. Folded sections are
    opened first, because a PDF cannot be clicked: whatever is closed when it is made is lost to
-   whoever it is sent to. They are folded back afterwards, so the page is left as it was. */
-document.querySelector('.save-pdf')?.addEventListener('click', () => {
+   whoever it is sent to. They are folded back afterwards, so the page is left as it was.
+
+   Charts load lazily, so one the reader never scrolled to was not there yet when print() ran,
+   and the PDF had an empty box where it should be. Every chart is fetched first. */
+document.querySelector('.save-pdf')?.addEventListener('click', async () => {
   const closed = [...document.querySelectorAll('details:not([open])')]
     .filter((d) => !d.closest('.needs-server'));
   closed.forEach((d) => { d.open = true; });
+  const images = [...document.images];
+  images.forEach((img) => { img.loading = 'eager'; });
+  await Promise.all(images.map((img) => img.complete ? null : new Promise((done) => {
+    img.addEventListener('load', done, { once: true });
+    img.addEventListener('error', done, { once: true });
+  })));
   addEventListener('afterprint', () => closed.forEach((d) => { d.open = false; }), { once: true });
   print();
+});
+/* Ctrl+P skips the button. Too late to wait for the charts, but it starts fetching them, so a
+   second try has them all. */
+addEventListener('beforeprint', () => {
+  [...document.images].forEach((img) => { img.loading = 'eager'; });
 });
 """
 
