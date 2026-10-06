@@ -151,6 +151,7 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
     t0 = time.monotonic()
     new = skipped = new_bytes = 0
     nodes: set[str] = set()
+    offered: set[str] = set()
 
     if verbose:
         print(f"[{cluster_id}] {source.describe()}")
@@ -159,6 +160,13 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
         for f in files:
             size = f.path.stat().st_size
             nodes.add(f.node)
+            offered.add(f"{f.node}/{f.name}")
+
+            if state.pruned.get(f"{f.node}/{f.name}") == size:
+                # Held once and deleted for its age. Storing it again only to delete it again
+                # was dft's every hour: 228 MB copied, decoded and pruned on each round.
+                skipped += 1
+                continue
 
             if not state.is_new(f.node, f.name, size):
                 # Same size as last time. Nothing to store, but the sighting is what proves the
@@ -176,6 +184,9 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
             if verbose:
                 mark = "~" if f.is_interim else "+"
                 print(f"  {mark} {f.node}/{f.name}  {size/1024:.0f} KB")
+        # A pruned file the source no longer offers cannot come back, so its record can go.
+        # Only after a complete pass: a run that failed half way saw only some of them.
+        state.pruned = {k: v for k, v in state.pruned.items() if k in offered}
     finally:
         if marker is not None:
             marker.clear()

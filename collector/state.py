@@ -97,6 +97,11 @@ class State:
     pending_window: list[str] | None = None
     history_before: str | None = None
     history_done: bool = False
+    # Files `prune.py` deleted, by key, with their size then. A source that keeps offering them
+    # -- an upload directory is never emptied -- would otherwise have them stored again as new:
+    # dft brought back the same 22 files, 228 MB, every hour, analysed them and pruned them
+    # again. Kept only while the source still offers the file (see `capture.py`).
+    pruned: dict[str, int] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ persistence
 
@@ -127,6 +132,7 @@ class State:
             # holds files got its history in one bundle and is complete, and one that holds
             # none has not started.
             history_done=raw.get("history_done", bool(raw.get("files"))),
+            pruned=raw.get("pruned", {}),
         )
 
     def save(self, path: Path) -> None:
@@ -144,6 +150,7 @@ class State:
             "pending_window": self.pending_window,
             "history_before": self.history_before,
             "history_done": self.history_done,
+            "pruned": self.pruned,
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(body, indent=2, sort_keys=True))

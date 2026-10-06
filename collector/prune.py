@@ -102,10 +102,14 @@ def prune_cluster(spec: dict, root: Path, apply: bool, verbose: bool = True) -> 
     if apply and doomed:
         state = State.load(base / "state.json", cluster_id)
         for f in doomed:
+            size = f.stat().st_size
             f.unlink()
             # Drop it from the state too. Otherwise the file list grows forever, and a stale
-            # entry would make `is_new` claim we still hold something we deleted.
-            state.files.pop(f"{f.parent.name}/{f.name}", None)
+            # entry would make `is_new` claim we still hold something we deleted. Remembered as
+            # pruned instead, so a source that offers it again does not bring it back.
+            key = f"{f.parent.name}/{f.name}"
+            held = state.files.pop(key, None)
+            state.pruned[key] = held.bytes if held is not None else size
         state.save(base / "state.json")
         if verbose:
             print(f"  deleted {len(doomed)} file(s), freed {freed/1048576:.0f} MB")

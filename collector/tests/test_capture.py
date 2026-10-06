@@ -129,6 +129,33 @@ def test_usage_is_recorded(tmp_path: Path):
     assert rows[0]["bytes_new"] == 1000
 
 
+def test_a_pruned_file_is_not_stored_again(tmp_path: Path):
+    """dft: an upload directory still offered the files prune had deleted, so every round
+    stored the same 22 files again, 228 MB, analysed them and pruned them once more."""
+    from datetime import datetime, timedelta, timezone
+    from prune import prune_cluster
+
+    fresh = "metrics." + (datetime.now(timezone.utc) - timedelta(hours=1)).strftime(
+        "%Y-%m-%dT%H-%M-%SZ") + "-00000"
+    old = "metrics.2026-01-01T00-00-00Z-00000"
+    src = make_source_dir(tmp_path, {"n0": [(old, 1000), (fresh, 1000)]})
+    data = tmp_path / "data"
+    spec = dict(spec_for(src), retention_days=30)
+
+    capture_cluster(spec, data, verbose=False)
+    prune_cluster(spec, data, apply=True, verbose=False)
+    assert not (data / "prod/ftdc/n0" / old).exists()
+
+    again = capture_cluster(spec, data, verbose=False)
+    assert again["files_new"] == 0, "the source still offers it, and it must not come back"
+    assert not (data / "prod/ftdc/n0" / old).exists()
+
+    # Gone from the source too: nothing can bring it back, so the record goes.
+    (src / "n0/27017/diagnostic.data" / old).unlink()
+    capture_cluster(spec, data, verbose=False)
+    assert State.load(data / "prod/state.json", "prod").pruned == {}
+
+
 def test_state_survives_between_runs(tmp_path: Path):
     src = make_source_dir(tmp_path, {"n0": [(NAME, 1000)]})
     capture_cluster(spec_for(src), tmp_path / "data", verbose=False)

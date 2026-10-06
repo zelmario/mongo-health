@@ -282,6 +282,60 @@ def retract_unreproduced(base: Path, produced: set[str], nodes: list[dict], stam
     return {r["id"] for r in gone}
 
 
+# Findings that are not an incident in time: judged once a day, or advice about the whole
+# history. Two of them overlapping says nothing about their being the same thing.
+NOT_INCIDENTS = frozenset({"baseline-excursion", "oversized-cluster", "capacity-runway"})
+
+
+def same_incident(a: dict, b: dict) -> bool:
+    """One rule, one member, overlapping in time: the same incident, whatever its id says.
+
+    The id is built from where the worst episode starts, and two things move that without the
+    incident changing. Retention: dft's redo saw only the last two hours of a day it had once
+    held whole, so each incident started at the edge of what was left, and six came back as new.
+    Growth: an incident still running can find a worse episode on a later run.
+    """
+    if a.get("rule") != b.get("rule") or a.get("node") != b.get("node"):
+        return False
+    if a.get("rule") in NOT_INCIDENTS:
+        return False
+    # One rule id covers five settings, and a resize moves two of them in the same instant.
+    if a.get("rule") == "setting-changed" and a.get("metric") != b.get("metric"):
+        return False
+    try:
+        return int(a["fromMs"]) <= int(b["toMs"]) and int(b["fromMs"]) <= int(a["toMs"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def collapse_duplicates(base: Path, stamp: str) -> set[str]:
+    """Held findings that are the same incident as one reported earlier, moved to
+    retracted.jsonl with the one they repeat. The first reported is the one kept: it is the one
+    somebody was told about, and its window is the widest, from before retention cut it."""
+    path = base / "findings.jsonl"
+    if not path.exists():
+        return set()
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    keep: list[dict] = []
+    gone: list[dict] = []
+    for row in sorted(rows, key=lambda r: (r.get("detected_at") or "", r.get("fromMs", 0))):
+        first = next((k for k in keep if same_incident(k, row)), None)
+        if first is None:
+            keep.append(row)
+        else:
+            gone.append(dict(row, retracted_at=stamp,
+                             retracted_because=f"the same incident as {first['id']}, "
+                                               "reported earlier"))
+    if gone:
+        append(base / "retracted.jsonl", gone)
+        ids = {r["id"] for r in gone}
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_text("".join(json.dumps(r, sort_keys=True) + "\n"
+                               for r in rows if r["id"] not in ids))
+        tmp.replace(path)
+    return {r["id"] for r in gone}
+
+
 def append(path: Path, rows: list[dict]) -> None:
     if not rows:
         return
@@ -417,7 +471,15 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
     ahead = runway.as_findings(runway.find(base / "baseline.jsonl"), window_from, window_to)
 
     # --- findings, only the ones not seen before ------------------------------------
+    if redo:
+        repeated = collapse_duplicates(base, stamp)
+        state.reported_findings = [i for i in state.reported_findings if i not in repeated]
+        if repeated and verbose:
+            print(f"  {len(repeated)} finding(s) were an incident already held, retracted")
     already = set(state.reported_findings)
+    findings_path = base / "findings.jsonl"
+    held = ([json.loads(line) for line in findings_path.read_text().splitlines() if line.strip()]
+            if findings_path.exists() else [])
     fresh = []
     redrawn: dict[str, dict] = {}
     produced: set[str] = set()
@@ -433,6 +495,14 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
             if redo:
                 redrawn[fid] = {k: f[k] for k in REFRESHED if f.get(k)}
             continue
+        # A new id for an incident already held. Its chart is not redrawn: what this run saw of
+        # it may be a clipped part, and the held one is the picture somebody was sent.
+        twin = next((h for h in held if h.get("id") in already and same_incident(h, f)), None)
+        if twin is not None:
+            produced.add(twin["id"])
+            continue
+        if any(same_incident(g, f) for g in fresh):
+            continue  # found twice in this run, under two ids
         fresh.append({
             "id": fid,
             "cluster_id": cluster_id,

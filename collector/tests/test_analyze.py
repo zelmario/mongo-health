@@ -152,6 +152,54 @@ def test_a_new_episode_is_reported(tmp_path: Path, monkeypatch):
     assert again["findings_new"] == 1
 
 
+def held_findings(tmp_path: Path) -> list[dict]:
+    return [json.loads(l) for l in
+            (tmp_path / "data/prod/findings.jsonl").read_text().splitlines() if l]
+
+
+def test_an_incident_clipped_by_retention_is_not_reported_again(tmp_path: Path, monkeypatch):
+    """dft: a redo over the last two hours of a day it once held whole saw each incident
+    start at the edge of what was left, so six came back under new ids."""
+    spec = setup(tmp_path)
+    whole = dict(a_finding(worst=T0), toMs=T0 + 10 * HOUR)
+    stub_engine(monkeypatch, engine_output(findings=[whole]))
+    analyze_cluster(spec, tmp_path / "data", verbose=False)
+
+    clipped = dict(a_finding(worst=T0 + 8 * HOUR), toMs=T0 + 10 * HOUR)
+    stub_engine(monkeypatch, engine_output(findings=[clipped]))
+    again = analyze_cluster(spec, tmp_path / "data", redo=True, verbose=False)
+
+    assert again["findings_new"] == 0
+    assert [f["id"] for f in held_findings(tmp_path)] == [finding_id("prod", whole)], \
+        "and the one somebody was told about stays, rather than being taken back"
+
+
+def test_a_redo_takes_back_duplicates_already_held(tmp_path: Path, monkeypatch):
+    spec = setup(tmp_path)
+    first = dict(a_finding(worst=T0), toMs=T0 + 10 * HOUR)
+    stub_engine(monkeypatch, engine_output(findings=[first]))
+    analyze_cluster(spec, tmp_path / "data", verbose=False)
+    # What the old code did: the clipped copy written as a finding of its own.
+    copy = dict(a_finding(worst=T0 + 8 * HOUR), toMs=T0 + 10 * HOUR)
+    row = dict(copy, id=finding_id("prod", copy), cluster_id="prod",
+               detected_at="2099-01-01T00:00:00+00:00", notified_at=None)
+    with (tmp_path / "data/prod/findings.jsonl").open("a") as fh:
+        fh.write(json.dumps(row) + "\n")
+    from state import State
+    state = State.load(tmp_path / "data/prod/state.json", "prod")
+    state.reported_findings.append(row["id"])
+    state.save(tmp_path / "data/prod/state.json")
+
+    stub_engine(monkeypatch, engine_output(findings=[copy]))
+    analyze_cluster(spec, tmp_path / "data", redo=True, verbose=False)
+
+    assert [f["id"] for f in held_findings(tmp_path)] == [finding_id("prod", first)]
+    retracted = [json.loads(l) for l in
+                 (tmp_path / "data/prod/retracted.jsonl").read_text().splitlines() if l]
+    assert [r["id"] for r in retracted] == [row["id"]]
+    assert finding_id("prod", first) in retracted[0]["retracted_because"]
+
+
 # ------------------------------------------------------------------------------- baseline
 
 def test_baseline_keeps_both_scopes_apart(tmp_path: Path, monkeypatch):
