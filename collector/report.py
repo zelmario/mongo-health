@@ -1650,13 +1650,18 @@ PROGRESS_JS = r"""
     const mb = (b) => (b / 1048576).toFixed(0) + ' MB';
     const mins = (s) => s < 90 ? Math.round(s) + ' s' : Math.round(s / 60) + ' min';
     // A full re-analysis is several runs, each counting its own files: one bar across them all.
+    // Within a run, decoding is 70% and the steps after it share the rest, as timed on Cluster1's
+    // closing run: 278 s decoding, then about 25 s for each member summarised or checked.
     const many = p.parts > 1;
+    const run = p.steps ? 0.7 * (p.total ? p.done / p.total : 1) + 0.3 * p.step / p.steps
+      : (p.stage === 'checks' ? 1 : p.total ? p.done / p.total : 0);
     const whole = (f) => many ? (p.part - 1 + f) / p.parts : f;
     const week = many ? (p.part < p.parts ? 'week ' + p.part + ' of ' + (p.parts - 1) : 'last days')
       + ' · ' : '';
-    if (p.stage === 'checks') {
-      bar.style.setProperty('--w', (100 * whole(1)).toFixed(0) + '%');
-      meta.textContent = week + 'running the checks…';
+    if (p.stage === 'summarising' || p.stage === 'checks') {
+      bar.style.setProperty('--w', (100 * whole(run)).toFixed(0) + '%');
+      meta.textContent = week + (p.stage === 'checks' ? 'running the checks' : 'summarising')
+        + (p.node ? ' · ' + short(p.node) : '') + '…';
     } else if (p.stage === 'queued') {
       meta.textContent = 'files received, the analysis starts in a moment…';
     } else if (p.stage === 'order') {
@@ -1670,7 +1675,7 @@ PROGRESS_JS = r"""
       if (p.total) bar.style.setProperty('--w', (100 * p.done / p.total).toFixed(0) + '%');
       meta.textContent = 'downloading · ' + mb(p.done) + (p.total ? ' of ' + mb(p.total) : '');
     } else if (p.total) {
-      bar.style.setProperty('--w', (100 * whole(p.done / p.total)).toFixed(0) + '%');
+      bar.style.setProperty('--w', (100 * whole(run)).toFixed(0) + '%');
       meta.textContent = week + p.done + ' of ' + p.total + ' files'
         + (p.node ? ' · ' + short(p.node) : '');
     }

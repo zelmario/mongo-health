@@ -1068,10 +1068,17 @@ const plan = nodes.map((node) => {
 });
 const totalFiles = plan.reduce((n, p) => n + p.files.length, 0);
 let doneFiles = 0;
+// After the decode: summarising each member, checking each member, then the charts. `step` is how
+// many are finished. Counted so the bar keeps moving there too: on Cluster1's closing run they
+// were 125 s of 404, with the bar at 100% the whole time.
+const members = plan.filter((p) => p.files.length > 0).length;
+const totalSteps = 2 * members + 1;
+let doneSteps = 0;
 function progress(node: string | null, stage: 'decoding' | 'summarising' | 'checks'): void {
   if (progressPath === undefined) return;
   try {
-    writeJson(progressPath, { done: doneFiles, total: totalFiles, node, stage, part, parts });
+    writeJson(progressPath, { done: doneFiles, total: totalFiles, step: doneSteps,
+                              steps: totalSteps, node, stage, part, parts });
   } catch {
     // A progress bar that cannot be drawn is no reason to fail the analysis.
   }
@@ -1109,6 +1116,7 @@ try {
     const { held, files } = plan[i]!;
     if (files.length === 0) continue;  // none held, or none in this slice
     progress(node, 'summarising');
+    doneSteps++;
     const nodeDaily = dailyDir !== undefined ? join(dailyDir, node) : undefined;
     // What every whole-history read below is limited to. Everything, without `--daily`.
     const scope = (decodeFrom > 0 ? { from: decodeFrom } : {}) as SeriesQuery;
@@ -1519,6 +1527,8 @@ try {
   // nine-day slice of Cluster1, against about 500 MB while decoding.
   const fromRules: Finding[] = [];
   for (const c of captures) {
+    progress(c.label, 'checks');
+    doneSteps++;
     fromRules.push(...await detect(source, [c], RULES.filter((r) => !perMember.includes(r)),
                                    windowQuery));
     fromRules.push(...await detect(source, [c], perMember.map((r) => ({
@@ -1549,6 +1559,7 @@ try {
   // Charts only for what is actually going to be sent. The gap findings have no series
   // behind them -- their evidence is the absence of one -- so they get no chart.
   const charts = new Map<string, Awaited<ReturnType<typeof chartFor>>>();
+  progress(null, 'checks');
   for (const f of fresh) {
     const capture = captures.find((c) => c.label === f.captureLabel);
     const reader = capture ? readers.get(capture.id) : undefined;
