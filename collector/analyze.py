@@ -95,7 +95,7 @@ ROUND_TIMEOUT, FULL_TIMEOUT = 1800, 4 * 3600
 
 def run_engine(ftdc: Path, since: str | None, timeout: int | None = None,
                daily: Path | None = None, progress: Path | None = None,
-               until: str | None = None) -> dict:
+               until: str | None = None, part: tuple[int, int] | None = None) -> dict:
     """Invoke the runner inside Big Hole and return its JSON.
 
     stdout is the JSON and stderr is for humans; they are kept apart so that decode progress
@@ -116,6 +116,8 @@ def run_engine(ftdc: Path, since: str | None, timeout: int | None = None,
         cmd += ["--daily", str(daily)]
     if progress is not None:
         cmd += ["--progress", str(progress.resolve())]
+    if part is not None:
+        cmd += ["--part", f"{part[0]}/{part[1]}"]
 
     if timeout is None:
         timeout = ROUND_TIMEOUT if since else FULL_TIMEOUT
@@ -160,12 +162,13 @@ def run_redo(ftdc: Path, base: Path, verbose: bool = True) -> dict:
     slices contribute is their findings.
     """
     slices = redo_slices(ftdc, datetime.now(timezone.utc))
+    runs = len(slices) + 1  # the slices, then the closing run
     kept: list[dict] = []
     for k, (start, end) in enumerate(slices):
         t0 = time.monotonic()
         since = start if k == 0 else start - SLICE_LEAD
         part = run_engine(ftdc, iso(since), until=iso(end), daily=base / "daily",
-                          progress=base / PROGRESS)
+                          progress=base / PROGRESS, part=(k + 1, runs))
         cut = (end - SLICE_LEAD).timestamp() * 1000
         mine = [f for f in part["findings"] if f["toMs"] < cut]
         kept += mine
@@ -174,7 +177,7 @@ def run_redo(ftdc: Path, base: Path, verbose: bool = True) -> dict:
                   f"{len(mine)} finding(s), {time.monotonic() - t0:.0f}s")
     closing = slices[-1][1] - SLICE_LEAD if slices else None
     out = run_engine(ftdc, iso(closing) if closing else None, daily=base / "daily",
-                     progress=base / PROGRESS)
+                     progress=base / PROGRESS, part=(runs, runs) if slices else None)
     out["findings"] = kept + out["findings"]
     return out
 

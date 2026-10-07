@@ -72,6 +72,10 @@ const dailyDir = argv.includes('--daily') ? argv[argv.indexOf('--daily') + 1]! :
 // which is the result and nothing else.
 const progressPath = argv.includes('--progress')
   ? argv[argv.indexOf('--progress') + 1]! : undefined;
+// Which run of a full re-analysis this is, as "k/n". Each slice counts its own files, so without
+// it the page's bar went back to zero every week of history.
+const [part, parts] = argv.includes('--part')
+  ? argv[argv.indexOf('--part') + 1]!.split('/').map(Number) : [undefined, undefined];
 
 /* --------------------------------------------------------------------- metrics ---- */
 
@@ -1067,7 +1071,7 @@ let doneFiles = 0;
 function progress(node: string | null, stage: 'decoding' | 'summarising' | 'checks'): void {
   if (progressPath === undefined) return;
   try {
-    writeJson(progressPath, { done: doneFiles, total: totalFiles, node, stage });
+    writeJson(progressPath, { done: doneFiles, total: totalFiles, node, stage, part, parts });
   } catch {
     // A progress bar that cannot be drawn is no reason to fail the analysis.
   }

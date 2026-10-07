@@ -1649,9 +1649,14 @@ PROGRESS_JS = r"""
     const bar = el.querySelector('.use-bar'), meta = el.querySelector('.meta');
     const mb = (b) => (b / 1048576).toFixed(0) + ' MB';
     const mins = (s) => s < 90 ? Math.round(s) + ' s' : Math.round(s / 60) + ' min';
+    // A full re-analysis is several runs, each counting its own files: one bar across them all.
+    const many = p.parts > 1;
+    const whole = (f) => many ? (p.part - 1 + f) / p.parts : f;
+    const week = many ? (p.part < p.parts ? 'week ' + p.part + ' of ' + (p.parts - 1) : 'last days')
+      + ' · ' : '';
     if (p.stage === 'checks') {
-      bar.style.setProperty('--w', '100%');
-      meta.textContent = 'running the checks…';
+      bar.style.setProperty('--w', (100 * whole(1)).toFixed(0) + '%');
+      meta.textContent = week + 'running the checks…';
     } else if (p.stage === 'queued') {
       meta.textContent = 'files received, the analysis starts in a moment…';
     } else if (p.stage === 'order') {
@@ -1665,8 +1670,9 @@ PROGRESS_JS = r"""
       if (p.total) bar.style.setProperty('--w', (100 * p.done / p.total).toFixed(0) + '%');
       meta.textContent = 'downloading · ' + mb(p.done) + (p.total ? ' of ' + mb(p.total) : '');
     } else if (p.total) {
-      bar.style.setProperty('--w', (100 * p.done / p.total).toFixed(0) + '%');
-      meta.textContent = p.done + ' of ' + p.total + ' files' + (p.node ? ' · ' + short(p.node) : '');
+      bar.style.setProperty('--w', (100 * whole(p.done / p.total)).toFixed(0) + '%');
+      meta.textContent = week + p.done + ' of ' + p.total + ' files'
+        + (p.node ? ' · ' + short(p.node) : '');
     }
   }
   function settled() {

@@ -357,16 +357,16 @@ def test_each_finding_is_kept_by_one_slice_and_seen_whole(tmp_path: Path, monkey
     whole = dict(cut_short, toMs=boundary + 2 * HOUR)
     calls = []
 
-    def engine(ftdc, since, until=None, **kw):
-        calls.append((since, until))
+    def engine(ftdc, since, until=None, part=None, **kw):
+        calls.append((since, until, part))
         return engine_output(findings=[early, cut_short] if until else [whole])
 
     monkeypatch.setattr(analyze, "run_engine", engine)
     monkeypatch.setattr(analyze, "redo_slices", lambda ftdc, until: [(week1, week2)])
     out = analyze.run_redo(tmp_path, tmp_path, verbose=False)
 
-    assert calls == [("2026-08-07T00:00:00Z", "2026-08-14T00:00:00Z"),
-                     ("2026-08-13T23:00:00Z", None)]
+    assert calls == [("2026-08-07T00:00:00Z", "2026-08-14T00:00:00Z", (1, 2)),
+                     ("2026-08-13T23:00:00Z", None, (2, 2))], "one progress bar across the runs"
     assert out["findings"] == [early, whole]
 
 
