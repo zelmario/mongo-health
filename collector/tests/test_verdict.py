@@ -108,7 +108,13 @@ def test_an_analysis_running_says_so_rather_than_not_watched():
     v = evaluate([], NOW, 30.0, True, 4.5, analyzing={"files": 26})
     assert v.state == "analyzing"
     assert v.label == "Analyzing FTDC"
-    assert "26 new files" in v.reason
+    assert "26 new files and the day before them" in v.reason
+
+
+def test_an_analysis_of_everything_held_does_not_count_new_files():
+    # A redo has nothing new, and the bar under the verdict walks the whole history.
+    v = evaluate([], NOW, 30.0, True, 4.5, analyzing={"files": 0, "whole": True})
+    assert v.reason.startswith("Reading all the FTDC held.")
 
 
 def test_a_cluster_whose_samples_are_arriving_is_waiting_not_unwatched():

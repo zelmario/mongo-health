@@ -423,10 +423,6 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
 
     if verbose:
         print(f"[{cluster_id}] {len(pending)} new file(s)")
-    # For the page: while this is on disk it says "Analyzing FTDC" rather than whatever the last
-    # verdict was. A first upload takes minutes, and the page meanwhile said "Not being watched".
-    (base / ANALYZING).write_text(json.dumps({"started": now(), "files": len(pending)}))
-
     t0 = time.monotonic()
     # Not just the new files: an episode can start in an old file and end in a new one, and
     # looking at them separately would either split it in two findings or lose it entirely.
@@ -439,6 +435,12 @@ def analyze_cluster(spec: dict, root: Path, redo: bool = False,
         # newest first, window by window. Read from `since`, the engine took them as already
         # summarised and judged Cluster1 on 43 hours of its 20 days. Read from the start.
         since = None
+    # For the page: while this is on disk it says "Analyzing FTDC" rather than whatever the last
+    # verdict was. A first upload takes minutes, and the page meanwhile said "Not being watched".
+    # `whole` says what is read besides the new files: everything held, or the day before them.
+    # The bar counts what the engine reads, and a round that said "6 new files" counted 16.
+    (base / ANALYZING).write_text(json.dumps({"started": now(), "files": len(pending),
+                                              "whole": since is None}))
     if since is None:
         # A re-analysis, a first capture, or files that arrived older than the last analysis:
         # everything held, so a slice at a time.

@@ -148,7 +148,13 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
         return Verdict("unwatched", "Nothing has been captured from this cluster yet.")
     if analyzing:
         n = analyzing.get("files") or 0
-        what = f"{n} new file{'s' if n != 1 else ''}" if n else "the new files"
+        if analyzing.get("whole"):
+            what = "all the FTDC held"
+        else:
+            # The engine reads from a day before the last analysis, so the bar under this counts
+            # more files than arrived: 16 against 6 on an hourly Cluster1 round.
+            what = (f"{n} new file{'s' if n != 1 else ''}" if n else "the new files") \
+                + " and the day before them"
         return Verdict("analyzing", f"Reading {what}. This page updates when the analysis "
                                     f"finishes.")
     # Files and no analysis has no findings either, and read as "Healthy" for the minutes a
