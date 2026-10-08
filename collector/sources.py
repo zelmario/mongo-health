@@ -23,6 +23,8 @@ from typing import Iterator, Protocol
 import requests
 from requests.auth import HTTPDigestAuth
 
+from state import timestamp_of
+
 
 def node_from_path(path: Path, fallback: str) -> str:
     """Work out which member a file belongs to, from its path.
@@ -303,10 +305,12 @@ class AtlasSource:
                 yield FTDCFile(node=node_from_path(path, fallback=path.parent.name),
                                name=path.name, path=path)
             shutil.rmtree(tmp, ignore_errors=True)
-            # Atlas serves each member's metrics.interim whatever the dates asked for, so no
-            # window was ever empty: both first fetches of Cluster1 on 8 Oct 2026 walked on to
-            # the 60-day limit, four jobs past its 20 days, and recorded history back to August.
-            if not any(p.name != "metrics.interim" for p in paths):
+            # Past the oldest file Atlas holds, a window does not come back empty: it holds each
+            # member's oldest file and metrics.interim, all opened after the window ends. Asked
+            # for 30 to 40 days back on 8 Oct 2026, Cluster1 sent its files of 18 and 19 Sep, and
+            # three first fetches walked on to the 60-day limit, four jobs past its 20 days. Only
+            # a file opened before the window ends can hold a sample from it.
+            if not any((t := timestamp_of(p.name)) is not None and t < to for p in paths):
                 self.history_done = True
                 return
             self.history_before = start

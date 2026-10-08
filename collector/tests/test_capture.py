@@ -479,8 +479,11 @@ def _history_source(monkeypatch, oldest: datetime, cut_above: timedelta | None =
         while d > start and d > oldest:
             days.append(d.strftime("metrics.%Y-%m-%dT%H-%M-%SZ-00000"))
             d -= timedelta(days=1)
-        # Atlas sends the interim with every bundle, whatever the dates asked for.
-        _bundle(target, days + ["metrics.interim"])
+        # Past the history, Atlas sends the oldest file it holds rather than nothing, and the
+        # interim with every bundle, whatever the dates asked for.
+        padding = [] if days else [(oldest + timedelta(hours=1)).strftime(
+            "metrics.%Y-%m-%dT%H-%M-%SZ-00000")]
+        _bundle(target, days + padding + ["metrics.interim"])
 
     monkeypatch.setattr(source, "_create_job", create)
     monkeypatch.setattr(source, "_wait", lambda *a, **kw: None)
@@ -502,7 +505,7 @@ def test_the_history_comes_newest_first_and_stops_at_an_empty_window(monkeypatch
     assert ordered[0][1] - ordered[0][0] == AtlasSource.HISTORY_FIRST_WINDOW
     assert source.history_done
     assert sum(end <= oldest for _, end in ordered) == 1, \
-        "a window holding only metrics.interim is the end, not a reason to walk on to 60 days"
+        "a window of files opened after it ends is the end, not a reason to walk on to 60 days"
     assert source.history_before > oldest - AtlasSource.HISTORY_MAX_WINDOW, \
         "and no history is claimed past the last window that had any"
 
