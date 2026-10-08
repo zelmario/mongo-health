@@ -55,7 +55,7 @@ class CaptureMarker:
         self.written = 0.0
 
     def __call__(self, stage: str, done: float = 0, total: float = 0, note: str | None = None,
-                 **_) -> None:
+                 ago: tuple[float, float] | None = None, **_) -> None:
         t = time.monotonic()
         if stage == self.stage and t - self.written < 2:
             return
@@ -64,8 +64,9 @@ class CaptureMarker:
         tmp = self.path.with_name(f".{CAPTURING}.tmp")
         # `note` is the seconds Atlas has been building, the one thing known about that wait.
         elapsed = float(note) if note and str(note).isdigit() else None
+        # `ago` is the days back the history window covers, on a first capture (sources.history).
         tmp.write_text(json.dumps({"started": self.started, "stage": stage, "done": done,
-                                   "total": total, "elapsed": elapsed}))
+                                   "total": total, "elapsed": elapsed, "ago": ago}))
         tmp.replace(self.path)
 
     def clear(self) -> None:

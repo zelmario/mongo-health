@@ -121,15 +121,15 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
     watched" until its first capture, while its samples were already coming in.
 
     `capturing` is what a first fetch is doing (see capture.CaptureMarker). On Atlas that fetch
-    waits up to half an hour for the bundle, and the page called the cluster unwatched all along.
+    took 38 minutes for 20 days of an M10, and the page called the cluster unwatched all along.
+    One sentence for every stage: the fetch builds and downloads a window of history after
+    another, and the progress bar under this says which.
     """
     if not captured and capturing:
-        if capturing.get("stage") == "download":
-            return Verdict("capturing", "Downloading everything Atlas still holds for this "
-                                        "cluster. The analysis starts when it lands.")
-        return Verdict("capturing", "Atlas is preparing everything it still holds for this "
-                                    "cluster, usually 3 to 10 days of FTDC. The first time this "
-                                    "takes up to half an hour.")
+        return Verdict("capturing", "Collecting everything Atlas still holds for this cluster, "
+                                    "newest first: from a few days to several weeks of FTDC. "
+                                    "On an M10 with 20 days it took 38 minutes. The analysis "
+                                    "starts when it lands.")
     if not captured and capture_failed:
         # Before the first capture, the error is the only thing known about the cluster.
         return Verdict("capture_failed", f"The first capture failed: {capture_failed.get('error')}"

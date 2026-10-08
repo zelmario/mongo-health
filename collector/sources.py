@@ -149,7 +149,11 @@ class AtlasSource:
         # derived from it is marked as one.
         self.job_estimate = job_estimate
         self.job_seconds: float | None = None
-        self.on_progress = on_progress or (lambda *a, **kw: None)
+        self._on_progress = on_progress or (lambda *a, **kw: None)
+        # The days back the history window being fetched covers, (newest, oldest), for the page.
+        # A first capture is several windows, and each one's build and download started the
+        # page over at "0 s so far" and "0 MB", with nothing saying how much had arrived.
+        self.history_days: tuple[float, float] | None = None
         # The first capture's progress through the history (see `history`), kept in the state.
         self.history_job: str | None = None
         self.pending_window: tuple[datetime, datetime] | None = None
@@ -215,6 +219,9 @@ class AtlasSource:
             node = node_from_path(path, fallback=path.parent.name)
             yield FTDCFile(node=node, name=path.name, path=path)
 
+    def on_progress(self, stage: str, **kw) -> None:
+        self._on_progress(stage, ago=self.history_days, **kw)
+
     # ------------------------------------------------------------- the first capture
     #
     # Atlas ends every download at about two minutes, whatever it has sent: measured on
@@ -248,10 +255,18 @@ class AtlasSource:
         now_ = datetime.now(timezone.utc) - timedelta(minutes=1)
         to = before or now_
         span = self.HISTORY_FIRST_WINDOW
+        try:
+            yield from self._history(now_, to, span)
+        finally:
+            self.history_days = None
+
+    def _history(self, now_: datetime, to: datetime, span: timedelta) -> Iterator[FTDCFile]:
+        days = lambda t: round((now_ - t).total_seconds() / 86_400, 2)  # noqa: E731
         while now_ - to < self.HISTORY_MAX_AGE:
             if self.history_job and self.pending_window:
                 start, to = self.pending_window
                 job_id = self.history_job
+                self.history_days = (days(to), days(start))
                 try:
                     self._wait(job_id, self.bootstrap_timeout, measure=False)
                 except (RuntimeError, requests.HTTPError):
@@ -259,6 +274,7 @@ class AtlasSource:
                     continue
             else:
                 start = to - span
+                self.history_days = (days(to), days(start))
                 self.on_progress("order")
                 job_id = self._create_job(None, window=(start, to))
                 self.history_job, self.pending_window = job_id, (start, to)

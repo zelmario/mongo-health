@@ -135,12 +135,13 @@ def test_a_failed_first_analysis_says_so_instead_of_promising_one():
 
 
 def test_a_first_atlas_capture_is_collecting_not_unwatched():
-    """Added a minute ago, Atlas building the bundle: it read "Not being watched" for the half
-    hour that takes."""
-    v = evaluate([], NOW, None, False, 0.0, capturing={"stage": "build"})
-    assert v.state == "capturing" and "half an hour" in v.reason
-    v = evaluate([], NOW, None, False, 0.0, capturing={"stage": "download"})
-    assert v.state == "capturing" and "Downloading" in v.reason
+    """Added a minute ago, Atlas building the bundle: it read "Not being watched" for the 38
+    minutes that took on Cluster1."""
+    build = evaluate([], NOW, None, False, 0.0, capturing={"stage": "build"})
+    assert build.state == "capturing" and "newest first" in build.reason
+    # Window after window, so the stage flips every few minutes: the sentence must not.
+    download = evaluate([], NOW, None, False, 0.0, capturing={"stage": "download"})
+    assert download.reason == build.reason
 
 
 def test_a_routine_capture_does_not_hide_the_verdict():

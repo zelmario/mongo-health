@@ -1673,6 +1673,23 @@ PROGRESS_JS = r"""
         + (p.node ? ' · ' + short(p.node) : '') + '…';
     } else if (p.stage === 'queued') {
       meta.textContent = 'files received, the analysis starts in a moment…';
+    } else if (p.ago) {
+      // A first capture from Atlas: window after window of history, newest first, until one
+      // comes back empty. How many is not known, but the days collected are, so they move the
+      // bar, against a nominal month and never to the end of the fetch's share. On Cluster1,
+      // 6 windows over 38 min for 20 days; a bar driven by each build sat at 36% for 35 min.
+      const [a, b] = p.ago;
+      const n = (x, unit) => x + ' ' + unit + (x === 1 ? '' : 's');
+      const back = b < 1.5
+        ? (a < 0.05 ? 'the last ' + n(Math.round(b * 24), 'hour')
+          : 'hours ' + Math.round(a * 24) + ' to ' + Math.round(b * 24) + ' back')
+        : (a < 0.5 ? 'the last ' + n(Math.round(b), 'day')
+          : 'days ' + Math.round(a) + ' to ' + Math.round(b) + ' back');
+      const got = a >= 0.5 ? ' · ' + n(Math.round(a), 'day') + ' collected' : '';
+      width(share * Math.min(a / 30, 0.95));
+      meta.textContent = (p.stage === 'order' ? 'asking Atlas for ' + back
+        : p.stage === 'build' ? 'Atlas is preparing ' + back + ' · ' + mins(p.elapsed || 0) + ' so far'
+        : 'downloading ' + back + ' · ' + mb(p.done)) + got;
     } else if (p.stage === 'order') {
       meta.textContent = 'asking Atlas for the FTDC…';
     } else if (p.stage === 'build') {

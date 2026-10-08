@@ -501,6 +501,23 @@ def test_the_history_comes_newest_first_and_stops_at_an_empty_window(monkeypatch
     assert source.history_done
 
 
+def test_each_window_tells_the_page_which_days_it_holds(monkeypatch):
+    """On Cluster1-first, 6 windows over 38 minutes: the page restarted at "0 s so far" and
+    "0 MB" on each one, and its bar sat at 36% for 35 minutes. The days collected are known."""
+    now_ = datetime.now(timezone.utc)
+    source, _ = _history_source(monkeypatch, oldest=now_ - timedelta(days=9))
+    asked = []
+    monkeypatch.setattr(source, "_on_progress",
+                        lambda stage, **kw: asked.append(kw["ago"]) if stage == "order" else None)
+    list(source.history(None))
+
+    assert asked[0] == (0.0, 2.0)
+    assert all(later[0] == earlier[1] for earlier, later in zip(asked, asked[1:])), \
+        "each window starts where the last one ended, so the days collected only grow"
+    assert asked[-1][0] >= 9
+    assert source.history_days is None, "an hourly fetch after it is not a window"
+
+
 def test_a_window_too_big_to_arrive_is_asked_for_again_with_half_the_days(monkeypatch):
     now_ = datetime.now(timezone.utc)
     source, ordered = _history_source(monkeypatch, oldest=now_ - timedelta(days=3),

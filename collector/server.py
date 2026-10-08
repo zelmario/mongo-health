@@ -736,9 +736,9 @@ def pick_page(token: str, group_id: str, found: list[dict], already: set[str]) -
         <input type="hidden" name="token" value="{esc(token)}">
         {''.join(rows)}
         {retention_field()}
-        <p class="hint">Adding one pulls everything Atlas still holds for it — usually 3 to 10
-          days. Atlas takes up to half an hour to prepare that the first time; the page shows the
-          cluster straight away and fills in when the data lands.</p>
+        <p class="hint">Adding one pulls everything Atlas still holds for it, from a few days to
+          several weeks, newest first. On an M10 with 20 days that took 38 minutes; the page shows
+          the cluster straight away and fills in when the data lands.</p>
         <button type="submit">Add the selected</button>
       </form>
     </div>""")
@@ -1154,7 +1154,7 @@ class Handler(SimpleHTTPRequestHandler):
             # A first fetch from Atlas: "analyzing" is what the page's script polls on, so the
             # bar keeps moving through the capture and into the analysis after it.
             body.update({"analyzing": True, **{k: fetch.get(k) for k in
-                                               ("stage", "done", "total", "elapsed")}})
+                                               ("stage", "done", "total", "elapsed", "ago")}})
         elif (report.read_json(base / "state.json") or {}).get("last_capture") \
                 and not (base / "summary.json").exists() \
                 and not (base / "analysis-failed.json").exists():

@@ -7,10 +7,10 @@
 The key comes from ATLAS_PUBLIC_KEY / ATLAS_PRIVATE_KEY, or from --public-key / --private-key;
 only the second way writes it into the config.
 
-The point is to see something the same day. Atlas holds 3 to 10 days of FTDC
-right now, and the moment a read-only key reaches it that history is kept — so the
-first run pulls **all of it** rather than starting from zero and waiting a week for
-the graphs to mean anything.
+The point is to see something the same day. Atlas holds days to weeks of FTDC
+right now (20 days on an idle M10), and the moment a read-only key reaches it that
+history is kept — so the first run pulls **all of it** rather than starting from zero
+and waiting a week for the graphs to mean anything.
 
 That single fetch is small: measured at 0.6 GB for an idle three-node cluster, 1.4 GB under
 real traffic.
