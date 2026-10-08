@@ -303,10 +303,13 @@ class AtlasSource:
                 yield FTDCFile(node=node_from_path(path, fallback=path.parent.name),
                                name=path.name, path=path)
             shutil.rmtree(tmp, ignore_errors=True)
-            self.history_before = start
-            if not paths:
+            # Atlas serves each member's metrics.interim whatever the dates asked for, so no
+            # window was ever empty: both first fetches of Cluster1 on 8 Oct 2026 walked on to
+            # the 60-day limit, four jobs past its 20 days, and recorded history back to August.
+            if not any(p.name != "metrics.interim" for p in paths):
                 self.history_done = True
                 return
+            self.history_before = start
             # Sized from what this window weighed, per second of history it covered.
             per_second = size / max((to - start).total_seconds(), 1)
             span = timedelta(seconds=self.HISTORY_WINDOW_BYTES / max(per_second, 1))

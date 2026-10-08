@@ -479,7 +479,8 @@ def _history_source(monkeypatch, oldest: datetime, cut_above: timedelta | None =
         while d > start and d > oldest:
             days.append(d.strftime("metrics.%Y-%m-%dT%H-%M-%SZ-00000"))
             d -= timedelta(days=1)
-        _bundle(target, days)
+        # Atlas sends the interim with every bundle, whatever the dates asked for.
+        _bundle(target, days + ["metrics.interim"])
 
     monkeypatch.setattr(source, "_create_job", create)
     monkeypatch.setattr(source, "_wait", lambda *a, **kw: None)
@@ -491,7 +492,8 @@ def test_the_history_comes_newest_first_and_stops_at_an_empty_window(monkeypatch
     """Atlas cuts every download at about two minutes, so a first bundle of 1.24 GB never
     arrived. The history is asked for in windows instead, until one comes back empty."""
     now_ = datetime.now(timezone.utc)
-    source, ordered = _history_source(monkeypatch, oldest=now_ - timedelta(days=9))
+    oldest = now_ - timedelta(days=9)
+    source, ordered = _history_source(monkeypatch, oldest=oldest)
     names = [f.name for f in source.history(None)]
 
     assert len(names) >= 8
@@ -499,6 +501,10 @@ def test_the_history_comes_newest_first_and_stops_at_an_empty_window(monkeypatch
         "each window ends where the one after it starts: no gap, newest first"
     assert ordered[0][1] - ordered[0][0] == AtlasSource.HISTORY_FIRST_WINDOW
     assert source.history_done
+    assert sum(end <= oldest for _, end in ordered) == 1, \
+        "a window holding only metrics.interim is the end, not a reason to walk on to 60 days"
+    assert source.history_before > oldest - AtlasSource.HISTORY_MAX_WINDOW, \
+        "and no history is claimed past the last window that had any"
 
 
 def test_each_window_tells_the_page_which_days_it_holds(monkeypatch):
