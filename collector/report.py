@@ -1656,10 +1656,19 @@ PROGRESS_JS = r"""
     const run = p.steps ? 0.7 * (p.total ? p.done / p.total : 1) + 0.3 * p.step / p.steps
       : (p.stage === 'checks' ? 1 : p.total ? p.done / p.total : 0);
     const whole = (f) => many ? (p.part - 1 + f) / p.parts : f;
+    // A fetch and the analysis after it are one bar, so it does not drop back to 0% when the
+    // decoding starts. Fetching is the first 40%: timed at 80 s of 230 on an hourly Cluster1
+    // round, and 27 min of 60 on its first fetch. A page opened after the fetch never saw it,
+    // and gives the analysis the whole bar.
+    const fetching = ['order', 'build', 'download'].includes(p.stage);
+    if (fetching) el.fetched = true;
+    const share = el.fetched ? 0.4 : 0;
+    const width = (f) => bar.style.setProperty('--w', (100 * f).toFixed(0) + '%');
+    const analysed = (f) => width(share + (1 - share) * whole(f));
     const week = many ? (p.part < p.parts ? 'week ' + p.part + ' of ' + (p.parts - 1) : 'last days')
       + ' · ' : '';
     if (p.stage === 'summarising' || p.stage === 'checks') {
-      bar.style.setProperty('--w', (100 * whole(run)).toFixed(0) + '%');
+      analysed(run);
       meta.textContent = week + (p.stage === 'checks' ? 'running the checks' : 'summarising')
         + (p.node ? ' · ' + short(p.node) : '') + '…';
     } else if (p.stage === 'queued') {
@@ -1668,14 +1677,15 @@ PROGRESS_JS = r"""
       meta.textContent = 'asking Atlas for the FTDC…';
     } else if (p.stage === 'build') {
       // Atlas reports a status and no percentage: a fraction only when this cluster has been
-      // timed before (sources.AtlasSource._wait), otherwise just how long it has been.
-      if (p.total) bar.style.setProperty('--w', (100 * p.done / p.total).toFixed(0) + '%');
+      // timed before (sources.AtlasSource._wait), otherwise just how long it has been. The build
+      // is most of a fetch, the download the last tenth of it.
+      if (p.total) width(share * 0.9 * p.done / p.total);
       meta.textContent = 'Atlas is preparing the bundle · ' + mins(p.elapsed || 0) + ' so far';
     } else if (p.stage === 'download') {
-      if (p.total) bar.style.setProperty('--w', (100 * p.done / p.total).toFixed(0) + '%');
+      if (p.total) width(share * (0.9 + 0.1 * p.done / p.total));
       meta.textContent = 'downloading · ' + mb(p.done) + (p.total ? ' of ' + mb(p.total) : '');
     } else if (p.total) {
-      bar.style.setProperty('--w', (100 * whole(run)).toFixed(0) + '%');
+      analysed(run);
       meta.textContent = week + p.done + ' of ' + p.total + ' files'
         + (p.node ? ' · ' + short(p.node) : '');
     }
