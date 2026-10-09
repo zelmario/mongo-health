@@ -189,8 +189,13 @@ class Writer:
         self.schema: list[tuple[str, str]] | None = None
         self.samples: list[list[int]] = []
         self.started: datetime | None = None
+        # When the newest sample on disk was taken. The poller says it on restart: from there to
+        # its next sample, the hole in the data is its own, not the member's (poller.py).
+        self.added: datetime | None = None
+        self.written_through: datetime | None = None
 
-    def add(self, raw: bytes) -> None:
+    def add(self, raw: bytes, at: datetime | None = None) -> None:
+        """One sample. `at` is when it was taken, for `written_through`; nothing else reads it."""
         flat = flatten(raw)
         schema = [(k, t) for k, t, _ in flat]
         if self.schema is not None and schema != self.schema:
@@ -198,6 +203,7 @@ class Writer:
         if self.schema is None:
             self.reference, self.schema, self.started = raw, schema, self.clock()
         self.samples.append([v for _, _, v in flat])
+        self.added = at or self.added
         if len(self.samples) >= self.chunk_samples:
             self.flush()
 
@@ -214,6 +220,7 @@ class Writer:
         # write is in flight, and the decoder treats a truncated tail as normal.
         with self.path.open("ab") as fh:
             fh.write(chunk)
+        self.written_through = self.added
         self.samples, self.reference, self.schema, self.started = [], None, None, None
 
     def _new_file(self, now: datetime, first: datetime) -> None:

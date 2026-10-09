@@ -76,6 +76,39 @@ const progressPath = argv.includes('--progress')
 // it the page's bar went back to zero every week of history.
 const [part, parts] = argv.includes('--part')
   ? argv[argv.indexOf('--part') + 1]!.split('/').map(Number) : [undefined, undefined];
+// Holes in a polled member's samples that the poller says are its own (poller.py, one JSON line
+// per hole: member, from, to). It was stopped, the member was not: every rebuild of the app read
+// as "Node stopped reporting" on every connected cluster.
+const unwatchedPath = argv.includes('--unwatched')
+  ? argv[argv.indexOf('--unwatched') + 1]! : undefined;
+const unwatched = readUnwatched(unwatchedPath);
+
+function readUnwatched(path: string | undefined): Map<string, Array<[number, number]>> {
+  const out = new Map<string, Array<[number, number]>>();
+  if (path === undefined || !existsSync(path)) return out;
+  for (const line of readFileSync(path, 'utf8').split('\n')) {
+    try {
+      const r = JSON.parse(line) as { member: string; from: string; to: string };
+      const span: [number, number] = [Date.parse(r.from), Date.parse(r.to)];
+      if (Number.isFinite(span[0]) && Number.isFinite(span[1])) {
+        out.set(r.member, [...(out.get(r.member) ?? []), span]);
+      }
+    } catch {
+      // A torn last line, from a poller killed while it wrote: the others still count.
+    }
+  }
+  return out;
+}
+
+// The poller's clock and mongod's are different hosts' clocks, and the sample the poller took
+// first is stamped by mongod. Half a minute either side absorbs that, and is still short of the
+// minute an outage needs to count.
+const UNWATCHED_SLACK_MS = 30_000;
+
+function pollersOwn(node: string, gap: { fromMs: number; toMs: number }): boolean {
+  return (unwatched.get(node) ?? []).some(([from, to]) =>
+    gap.fromMs >= from - UNWATCHED_SLACK_MS && gap.toMs <= to + UNWATCHED_SLACK_MS);
+}
 
 /* --------------------------------------------------------------------- metrics ---- */
 
@@ -1366,7 +1399,7 @@ try {
 
     // The writer already computes gaps against the node's real cadence, so there is no
     // threshold to guess: this is a measured interruption, not a heuristic.
-    const gaps = (manifest.gaps ?? []).map((g) => ({
+    const gaps = (manifest.gaps ?? []).filter((g) => !pollersOwn(node, g)).map((g) => ({
       fromMs: g.fromMs,
       toMs: g.toMs,
       seconds: Math.round((g.toMs - g.fromMs) / 1000),

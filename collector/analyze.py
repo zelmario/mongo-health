@@ -118,6 +118,10 @@ def run_engine(ftdc: Path, since: str | None, timeout: int | None = None,
         cmd += ["--progress", str(progress.resolve())]
     if part is not None:
         cmd += ["--part", f"{part[0]}/{part[1]}"]
+    # Holes the poller says are its own (poller.UNWATCHED), dropped before any check sees them.
+    unwatched = ftdc.parent / "unwatched.jsonl"
+    if unwatched.exists():
+        cmd += ["--unwatched", str(unwatched.resolve())]
 
     if timeout is None:
         timeout = ROUND_TIMEOUT if since else FULL_TIMEOUT

@@ -22,13 +22,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import signal
 import sys
 import threading
 import time
 import zlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import bson
 from bson.codec_options import CodecOptions
 from bson.raw_bson import RawBSONDocument
 from pymongo import MongoClient
@@ -52,6 +54,28 @@ RAW = CodecOptions(document_class=RawBSONDocument)
 # The first chunk of a member's life is written after this many samples instead of the usual
 # five minutes' worth, so the first evaluation of a newly connected cluster waits a minute.
 FIRST_CHUNK = 6
+
+# Where the poller says which holes in a member's samples are its own: it was stopped, not the
+# member. Every rebuild of the app restarts it, and each restart read as "Node stopped
+# reporting" on every connected cluster (17:25-17:27 on the first clean install). The runner
+# drops the gaps inside these intervals (runner/analyze.ts, --unwatched).
+UNWATCHED = "unwatched.jsonl"
+
+
+def uptime_of(raw: bytes) -> float | None:
+    """mongod's serverStatus.uptime in one getDiagnosticData sample, in seconds.
+
+    At the top of the sample before 8.0, inside a role section (common, shard...) from 8.0 on.
+    """
+    try:
+        doc = bson.decode(raw)
+    except Exception:
+        return None
+    for d in (doc, *(v for v in doc.values() if isinstance(v, dict))):
+        status = d.get("serverStatus")
+        if isinstance(status, dict) and isinstance(status.get("uptime"), (int, float)):
+            return float(status["uptime"])
+    return None
 
 
 def client_for(uri: str, host: str | None = None) -> MongoClient:
@@ -130,10 +154,33 @@ def chunk_for(interval: int) -> int:
 
 class MemberPoller(threading.Thread):
     def __init__(self, uri: str, host: str, out: Path, stop: threading.Event, status: dict,
-                 interval: int = INTERVAL):
+                 interval: int = INTERVAL, resume_from: datetime | None = None,
+                 unwatched: Path | None = None):
         super().__init__(daemon=True, name=f"poll {host}")
         self.uri, self.host, self.out, self.stop, self.status = uri, host, out, stop, status
         self.interval = interval
+        # The newest sample a previous run of the poller wrote for this member, and where to say
+        # that the hole from there to this run's first sample was the poller's.
+        self.resume_from, self.unwatched = resume_from, unwatched
+
+    def own_gap(self, raw: bytes, now: datetime) -> dict | None:
+        """The hole since the previous run, recorded as the poller's own, unless mongod
+        restarted inside it: then the member was down too, and its outage is real."""
+        start, self.resume_from = self.resume_from, None
+        if start is None or self.unwatched is None:
+            return None
+        gap = (now - start).total_seconds()
+        if gap <= 2 * self.interval:
+            return None
+        up = uptime_of(raw)
+        if up is not None and up < gap:
+            return None
+        record = {"member": member_dir(self.host), "from": start.isoformat(),
+                  "to": now.isoformat(), "uptime": up}
+        self.unwatched.parent.mkdir(parents=True, exist_ok=True)
+        with self.unwatched.open("a") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+        return record
 
     def run(self) -> None:
         client = None
@@ -147,12 +194,14 @@ class MemberPoller(threading.Thread):
                     writer = ftdcwrite.Writer(self.out, lambda: self._metadata(client),
                                               chunk_samples=chunk_for(self.interval))
                 raw = client.admin.command("getDiagnosticData", codec_options=RAW)["data"].raw
-                writer.add(raw)
+                taken = datetime.now(timezone.utc)
+                writer.add(raw, at=taken)
+                if self.resume_from is not None:
+                    self.own_gap(raw, taken)
                 if len(writer.samples) >= chunk:
                     writer.flush()
                     chunk = chunk_for(self.interval)
-                self.status[self.host] = {"last_sample": datetime.now(timezone.utc).isoformat(),
-                                          "error": None}
+                self._status_ok(writer)
             except Exception as e:
                 self.status[self.host] = {**self.status.get(self.host, {}),
                                           "error": f"{type(e).__name__}: {str(e)[:200]}"}
@@ -162,8 +211,16 @@ class MemberPoller(threading.Thread):
             self.stop.wait(max(0.0, self.interval - (time.monotonic() - started)))
         if writer is not None:
             writer.flush()
+            self._status_ok(writer)
         if client is not None:
             client.close()
+
+    def _status_ok(self, writer) -> None:
+        written = writer.written_through or (self.status.get(self.host) or {}).get("last_written")
+        self.status[self.host] = {
+            "last_sample": datetime.now(timezone.utc).isoformat(),
+            "last_written": written.isoformat() if isinstance(written, datetime) else written,
+            "error": None}
 
     @staticmethod
     def _metadata(client: MongoClient) -> dict:
@@ -185,6 +242,8 @@ class ClusterPoller:
         self.base = data / cluster_id / "incoming"
         self.members: dict[str, tuple[MemberPoller, threading.Event]] = {}
         self.status: dict = {}
+        # Where the previous run stopped writing each member, from the status it left behind.
+        self.previous = previous_writes(self.base / "status.json")
         self.discovered_at = 0.0
         self.kind = None
         self.error = None
@@ -212,7 +271,8 @@ class ClusterPoller:
         for host in wanted - set(self.members):
             stop = threading.Event()
             t = MemberPoller(self.uri, host, self.base / member_dir(host), stop, self.status,
-                             self.interval)
+                             self.interval, resume_from=self.previous.pop(host, None),
+                             unwatched=self.base.parent / UNWATCHED)
             t.start()
             self.members[host] = (t, stop)
 
@@ -228,6 +288,34 @@ class ClusterPoller:
             event.set()
         for t, _ in self.members.values():
             t.join(timeout=self.interval * 2 + TIMEOUT_MS / 1000)
+
+
+def previous_writes(status_path: Path) -> dict[str, datetime]:
+    """Per member, the newest sample a previous run wrote to disk.
+
+    `last_written`, not `last_sample`: a sample still in memory when the poller was killed never
+    reached a file, so the hole in the data starts at the last one written. A status from before
+    `last_written` existed was left by a poller that never flushed on the way out, so its
+    `last_sample` is taken back by the most a chunk holds, five minutes.
+
+    A member that was failing when the poller stopped is left out: the hole may be the member's.
+    """
+    try:
+        members = json.loads(status_path.read_text()).get("members") or {}
+    except (OSError, ValueError, AttributeError):
+        return {}
+    out = {}
+    for host, m in members.items():
+        if not isinstance(m, dict) or m.get("error"):
+            continue
+        try:
+            if m.get("last_written"):
+                out[host] = datetime.fromisoformat(m["last_written"])
+            elif m.get("last_sample"):
+                out[host] = datetime.fromisoformat(m["last_sample"]) - timedelta(seconds=300)
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def targets(config_path: Path) -> dict[str, str]:
@@ -247,6 +335,18 @@ def main() -> int:
     args = ap.parse_args()
 
     running: dict[str, ClusterPoller] = {}
+    # `docker compose stop` sends SIGTERM. Left to the default, the samples of the chunk in
+    # memory, up to five minutes of them at 10 s, died with the process.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        return _poll(args, running)
+    finally:
+        for p in running.values():
+            p.stop()
+            p.write_status()
+
+
+def _poll(args, running: dict) -> int:
     print(f"polling every {INTERVAL}s unless a cluster says otherwise; config re-read every "
           f"{RELOAD_EVERY}s", flush=True)
     while True:
