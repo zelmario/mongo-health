@@ -1925,6 +1925,12 @@ def page_cluster(cluster_id: str, summary: dict, state: dict, recent: list, olde
         # down is reading backwards in time, which is also the direction a cause is found in.
         events.sort(key=lambda e: -e[0])
         found = f'<ol class="axis">{"".join(html for _, html in events)}</ol>'
+    elif not summary:
+        # No analysis yet. Under "Collecting the FTDC", "every check ran" was a clean bill of
+        # health from checks that had not run.
+        found = ('<div class="quiet"><b>No check has run yet</b>'
+                 '<p>The checks run over the FTDC once it has arrived. This page updates when '
+                 'they finish.</p></div>')
     elif quiet is not None:
         # "Nothing to report" printed under the silence banner reads as an all-clear about now.
         found = ('<div class="quiet"><b>Nothing to report, up to the silence</b>'

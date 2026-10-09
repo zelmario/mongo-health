@@ -350,6 +350,15 @@ def test_no_incident_count_while_an_analysis_runs(tmp_path):
     assert 'data-progress="../progress/prod"' in page
 
 
+def test_no_clean_bill_before_the_first_analysis(tmp_path):
+    """A first fetch takes most of an hour, and the page said every check ran all along."""
+    spec = cluster(tmp_path / "data", [])
+    (tmp_path / "data" / "prod" / "summary.json").unlink()
+    page = (build(tmp_path, [spec]) / "prod" / "index.html").read_text()
+    assert "No check has run yet" in page
+    assert "Every check ran" not in page
+
+
 def test_no_progress_bar_once_analysed(tmp_path):
     """The page's script reloads until the bar is gone: a finished page must not carry it."""
     spec = cluster(tmp_path / "data", [])
