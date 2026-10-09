@@ -56,9 +56,30 @@ It is not a real-time monitor and does not page anyone. It analyses in hourly ro
 answer can be up to an hour old. The point is the full resolution history and an answer with
 evidence, not seconds-fresh alarms. Keep your live monitoring (PMM or similar) for that.
 
-## Quick start
+## Before you start
 
-You need Docker with Compose v2.
+You need:
+
+- **Docker with Compose v2.** The first `docker compose up` builds a 600 MB image. On an
+  8-core laptop with an empty Docker cache that took 2 min 24 s.
+- **About 2 GB of free memory while an analysis runs.** Idle, the three containers use about
+  250 MB.
+- **Disk for the FTDC you keep.** A first fetch from an Atlas M10 brought down 1.2 GB for 20
+  days of a three-member replica set. After that, plan for about 20 MB a member a day when
+  idle, several times that under load. A cluster connected by connection string writes about
+  22 MB a member a day at the default 10 s.
+- **Time for the first fetch from Atlas.** 32 to 41 minutes for 20 days of an M10, then about
+  10 minutes of analysis. Uploaded files and connected clusters are analysed within minutes,
+  unless an Atlas first fetch is running: they wait for it, and their page says so.
+
+What it does not do yet:
+
+- Replica sets only. Sharded clusters are not supported in this version.
+- On Atlas, only FTDC is collected, not the `mongod` logs.
+- One password for the page (`UI_PASSWORD`), no user accounts. Each person runs their own copy.
+- Tested on MongoDB 7.0 and 8.0, Atlas and self-managed (Percona Server for MongoDB 8.0).
+
+## Quick start
 
 ```bash
 git clone https://github.com/zelmario/mongo-health.git
@@ -182,6 +203,18 @@ when it goes quiet.
 The page listens on `127.0.0.1:8080` only, because it describes your clusters and its forms
 write API keys. To reach it from elsewhere, set `UI_PASSWORD` in `.env` and put it behind HTTPS.
 
+## Updating
+
+From the repository directory:
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+The containers restart and a collection round starts at once. Your clusters, their FTDC and
+their findings stay in the volumes.
+
 ## Your data
 
 Everything lives in two Docker volumes:
@@ -191,12 +224,6 @@ Everything lives in two Docker volumes:
 
 **Back up `data`.** The baseline cannot be rebuilt: the FTDC it came from is gone from Atlas
 within days.
-
-## Limits
-
-- Replica sets only. Sharded clusters are not supported in this version.
-- On Atlas, only FTDC is collected, not the `mongod` logs.
-- Tested on MongoDB 7.0 and 8.0, Atlas and self-managed (Percona Server for MongoDB 8.0).
 
 ## Repository layout
 
@@ -223,11 +250,15 @@ docker compose run --rm -T --entrypoint "" -v "$PWD":/repo -w /repo/collector \
 
 The full run takes one to three minutes.
 
-## Contributing
+## Feedback and contributing
 
-This is a work in progress, preparing for its first public release. Issues and pull requests
-are welcome, especially FTDC from a case the checks missed: that is how most of the rules here
-were written.
+This is a work in progress, preparing for its first public release. Open an issue at
+<https://github.com/zelmario/mongo-health/issues> for anything that failed, read wrong or
+confused you. A screenshot of the page helps.
+
+The most useful feedback is FTDC from a case the checks missed or got wrong, with a line on
+what really happened. That is how most of the rules here were written. Pull requests are
+welcome too.
 
 ## License
 
