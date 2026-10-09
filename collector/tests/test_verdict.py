@@ -122,6 +122,12 @@ def test_a_cluster_whose_samples_are_arriving_is_waiting_not_unwatched():
     assert v.state == "waiting" and "3 members" in v.reason
 
 
+def test_uploaded_files_are_not_samples_arriving():
+    v = evaluate([], NOW, None, False, 0.0, arriving={"members": 3, "uploaded": True})
+    assert v.state == "pending" and "Files from 3 members" in v.reason
+    assert "Samples" not in v.reason
+
+
 def test_a_poller_error_is_said_as_it_was_said():
     v = evaluate([], NOW, None, False, 0.0, arriving={"error": "Authentication failed."})
     assert v.state == "unwatched" and "Authentication failed." in v.reason

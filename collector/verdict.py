@@ -140,6 +140,12 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
         if arriving and arriving.get("error"):
             return Verdict("unwatched", f"The collector cannot read this cluster: "
                                         f"{arriving['error']}")
+        if arriving and arriving.get("uploaded"):
+            # An upload read "Samples are arriving from 3 members" as if something sent them.
+            n = arriving["members"]
+            return Verdict("pending", f"Files from {n} member{'s' if n != 1 else ''} have "
+                                      f"arrived, but no check has run over them yet. This page "
+                                      f"updates when the analysis finishes.")
         if arriving and arriving.get("members"):
             n = arriving["members"]
             return Verdict("waiting", f"Samples are arriving from {n} member"

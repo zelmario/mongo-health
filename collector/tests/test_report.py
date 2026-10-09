@@ -415,6 +415,19 @@ def test_a_new_connected_cluster_says_its_samples_are_arriving(tmp_path):
     assert "Not being watched" not in index
 
 
+def test_an_upload_waiting_for_its_first_analysis_says_files_not_samples(tmp_path):
+    base = tmp_path / "data" / "case"
+    for m in ("db1_27017", "db2_27017"):
+        (base / "incoming" / m).mkdir(parents=True)
+        (base / "incoming" / m / "metrics.2026-10-01T18-19-48Z-00000").write_bytes(b"x")
+    spec = {"cluster_id": "case", "source": {"type": "onprem"},
+            "mute": [], "notify": [], "retention_days": 30, "report_url": None}
+    index = (build(tmp_path, [spec]) / "index.html").read_text()
+    assert "Not checked yet" in index and "Files from 2 members" in index
+    assert "files received" in index
+    assert "Samples are arriving" not in index and "connected" not in index
+
+
 # ------------------------------------------------------------------ every time it happened
 
 MIN = 60_000

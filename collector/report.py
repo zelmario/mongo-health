@@ -1375,11 +1375,12 @@ def read_json(path: Path) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-def arriving(base: Path) -> dict | None:
+def arriving(base: Path, uploaded: bool = False) -> dict | None:
     """What has reached `incoming/` for a cluster that has not been captured yet.
 
     `members` counts the members the poller is reading without error, or that have files
-    waiting; `error` is the first error the poller reported, said as it said it.
+    waiting; `error` is the first error the poller reported, said as it said it. `uploaded`
+    marks files somebody handed over, which are not samples arriving from anything.
     """
     incoming = base / "incoming"
     if not incoming.is_dir():
@@ -1396,7 +1397,9 @@ def arriving(base: Path) -> dict | None:
     reading = {k for k, m in members.items() if isinstance(m, dict) and m.get("last_sample")}
     with_files = {d.name for d in incoming.iterdir() if d.is_dir() and any(d.glob("metrics.*"))}
     n = max(len(reading), len(with_files))
-    return {"members": n} if n else None
+    if not n:
+        return None
+    return {"members": n, "uploaded": True} if uploaded else {"members": n}
 
 
 def analyzing(base: Path, now: datetime) -> dict | None:
@@ -2310,6 +2313,8 @@ def page_index(rows: list[dict], now: datetime) -> str:
     for r in rows:
         if not r["captured"] and r["verdict"].state == "waiting":
             state = "connected, first samples arriving…"
+        elif not r["captured"] and r["verdict"].state == "pending":
+            state = "files received, waiting for the first analysis…"
         elif r["verdict"].state == "capturing":
             state = "collecting FTDC…"
         elif r["verdict"].state == "capture_failed":
@@ -2439,7 +2444,8 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
                        bool(state.get("last_capture")),
                        float(summary.get("days_of_raw_ftdc") or 0),
                        analysed=bool(summary), ends=ends, analyzing=analyzing(base, now),
-                       arriving=None if state.get("last_capture") else arriving(base),
+                       arriving=None if state.get("last_capture")
+                       else arriving(base, uploaded=config.files_only(spec)),
                        failed=read_json(base / "analysis-failed.json"),
                        capturing=capturing(base, now),
                        capture_failed=read_json(base / "capture-failed.json"))
