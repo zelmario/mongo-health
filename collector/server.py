@@ -942,9 +942,11 @@ class Handler(SimpleHTTPRequestHandler):
                 added.append(c["name"])
             except (ValueError, config.ConfigError):
                 continue
-        self.app.rebuild()
+        # Started before the rebuild: when the round has to wait, the launcher says so in
+        # queued.json, and the page drawn now is the one that has to say it.
         for name in added:
             self.app.start_capture(name)
+        self.app.rebuild()
         return self._redirect(f"/{added[0]}/index.html" if len(added) == 1 else "/index.html")
 
     # --------------------------------------------------------------- on-premise
@@ -1145,8 +1147,8 @@ class Handler(SimpleHTTPRequestHandler):
                                 "source": source})
         except (ValueError, config.ConfigError) as e:
             return self._html(folder_page(str(e), pending["id"], pending["folder"]), 400)
-        self.app.rebuild()
         self.app.start_capture(pending["id"])
+        self.app.rebuild()
         return self._redirect(f"/{pending['id']}/index.html")
 
     def _progress(self, cluster_id: str):
@@ -1277,10 +1279,10 @@ class Handler(SimpleHTTPRequestHandler):
         incoming = self.app.data / pending["id"] / "incoming"
         for token in pending["uploads"]:
             ftdcfiles.adopt(self._staging(token), incoming)
-        self.app.rebuild()
         # Uploaded history is there to capture now. A connection alone has nothing until the
         # poller finds the cluster, within a minute, and writes its first samples a minute later.
         self.app.start_capture(pending["id"], delay=0 if pending["uploads"] else 150)
+        self.app.rebuild()
         return self._redirect(f"/{pending['id']}/index.html")
 
 
