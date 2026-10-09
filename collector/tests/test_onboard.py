@@ -201,3 +201,48 @@ def test_a_sharded_cluster_is_disabled_on_the_pick_page_with_its_reason(monkeypa
 def discover_with(monkeypatch, clusters):
     stub(monkeypatch, clusters)
     return discover("g", "pub", "priv")
+
+
+def test_a_cluster_added_from_the_command_line_keeps_what_the_page_keeps(tmp_path):
+    cfg = tmp_path / "config.json"
+    add_to_config(cfg, [], "g", [{"name": "c1", "replica_set": "rs1"}], None)
+    add_to_config(cfg, [], "g", [{"name": "c2", "replica_set": "rs2"}], None, retention_days=30)
+    days = {c["id"]: c["retention_days"] for c in json.loads(cfg.read_text())["clusters"]}
+    assert days == {"c1": 90, "c2": 30}
+
+
+def test_a_round_cannot_start_while_onboarding_fetches(tmp_path, monkeypatch):
+    """The hourly round fetched the same cluster into the same state.json, mid-onboarding."""
+    import fcntl  # noqa: PLC0415
+    import onboard  # noqa: PLC0415
+    lock = tmp_path / ".run.lock"
+    monkeypatch.setenv("LOCK", str(lock))
+    monkeypatch.delenv("ROUND_LOCK_HELD", raising=False)
+    monkeypatch.setenv("ATLAS_PUBLIC_KEY", "p")
+    monkeypatch.setenv("ATLAS_PRIVATE_KEY", "k")
+    monkeypatch.setattr(onboard, "discover", lambda *a: [
+        {"name": "c1", "replica_set": "rs1", "tier": "M10", "version": "8.0",
+         "state": "IDLE", "autoscaling": False}])
+    held = []
+
+    def step(cmd, quiet):
+        with open(lock, "a") as fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                held.append(False)
+            except BlockingIOError:
+                held.append(True)
+        return False  # stop after the first step
+    monkeypatch.setattr(onboard, "run", step)
+    monkeypatch.setattr(sys, "argv", ["onboard.py", "--config", str(tmp_path / "c.json"),
+                                      "--data", str(tmp_path / "d"), "--group-id", "g"])
+    assert onboard.main() == 1
+    assert held == [True]
+
+
+def test_the_report_is_pointed_at_where_it_is_served():
+    one = [{"name": "c1"}]
+    assert onboard.report_link([{"report_url": None}], one) == \
+        "http://localhost:8080/c1/index.html"
+    assert onboard.report_link([{"report_url": "https://r.example.com"}], one + [{"name": "c2"}]) \
+        == "https://r.example.com/index.html"

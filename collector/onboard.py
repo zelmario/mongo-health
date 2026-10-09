@@ -88,7 +88,7 @@ def discover(group_id: str, public_key: str, private_key: str) -> list[dict]:
 
 
 def add_to_config(path: Path, notify: list[str], group_id: str, clusters: list[dict],
-                  keys: dict | None = None) -> int:
+                  keys: dict | None = None, retention_days: int = 90) -> int:
     """Merge the discovered clusters into the config, leaving existing ones alone.
 
     `keys` are written into each source only when given. Keys that came from the environment
@@ -104,7 +104,10 @@ def add_to_config(path: Path, notify: list[str], group_id: str, clusters: list[d
             continue
         source = {"type": "atlas", "group_id": group_id, "replica_set": c["replica_set"]}
         source.update(keys or {})
-        cfg["clusters"].append({"id": c["name"], "source": source})
+        # Set per cluster, as the page does. Left out, a cluster added from here kept its raw
+        # FTDC for the config's default year, about 22 GB for an idle three-member M10.
+        cfg["clusters"].append({"id": c["name"], "retention_days": retention_days,
+                                "source": source})
         added += 1
 
     path.write_text(json.dumps(cfg, indent=2) + "\n")
@@ -113,7 +116,9 @@ def add_to_config(path: Path, notify: list[str], group_id: str, clusters: list[d
 
 
 def run(cmd: list[str], quiet: bool) -> bool:
-    r = subprocess.run(cmd, capture_output=quiet, text=True)
+    # Every step runs under the lock main() holds; said to it, so analyze.py does not wait for it.
+    r = subprocess.run(cmd, capture_output=quiet, text=True,
+                       env={**os.environ, "ROUND_LOCK_HELD": "1"})
     if r.returncode != 0 and quiet:
         print((r.stderr or r.stdout or "").strip()[-400:], file=sys.stderr)
     return r.returncode == 0
@@ -149,6 +154,8 @@ def main() -> int:
                     help="only this cluster; repeat for several. Default: all in the project")
     ap.add_argument("--notify", action="append", default=[],
                     help="where findings go, when the config does not say yet")
+    ap.add_argument("--retention-days", type=int, default=90,
+                    help="how long raw FTDC is kept, as on the page (default: 90)")
     ap.add_argument("--discover-only", action="store_true",
                     help="list what is there and change nothing")
     ap.add_argument("--quiet", action="store_true")
@@ -203,24 +210,36 @@ def main() -> int:
     if args.discover_only:
         return 0
 
-    added = add_to_config(args.config, args.notify, args.group_id, wanted, keys)
-    print(f"\n  {added} cluster(s) added to {args.config}")
+    # Held from the config write through the analysis, as a round holds it. The first fetch
+    # takes most of an hour, and an hourly round starting in the middle of it would fetch the
+    # same cluster into the same state.json. Now that round skips its slot.
+    import analyze  # noqa: PLC0415
+    with analyze.round_lock():
+        added = add_to_config(args.config, args.notify, args.group_id, wanted, keys,
+                              retention_days=args.retention_days)
+        print(f"\n  {added} cluster(s) added to {args.config}")
+        if not first_capture(args, wanted):
+            return 1
+    return evaluate(args, wanted)
 
+
+def first_capture(args, wanted: list[dict]) -> bool:
     # The bootstrap itself: capture with no `--since`, which is what capture.py does for a
-    # cluster it has never seen. Everything Atlas holds comes down in one go.
+    # cluster it has never seen. Atlas's history comes down window by window, newest first.
     print("\npulling everything Atlas still holds — this is the slow part")
     ok = all([run(["python3", "capture.py", "--config", str(args.config), "--data",
                    str(args.data), "--cluster", c["name"]], args.quiet) for c in wanted])
     if not ok:
         print("the first capture failed; the cluster is configured, so the cron will retry",
               file=sys.stderr)
-        return 1
+        return False
 
     print("\nanalysing")
-    if not all([run(["python3", "analyze.py", "--config", str(args.config), "--data",
-                     str(args.data), "--cluster", c["name"]], args.quiet) for c in wanted]):
-        return 1
+    return all([run(["python3", "analyze.py", "--config", str(args.config), "--data",
+                     str(args.data), "--cluster", c["name"]], args.quiet) for c in wanted])
 
+
+def evaluate(args, wanted: list[dict]) -> int:
     # The first evaluation, over everything Atlas still held. Printed as well as written: the
     # answer to "is it healthy?" should be the last thing on the screen after onboarding, not a
     # file somebody has to know to open.
@@ -229,13 +248,22 @@ def main() -> int:
 
     import recommend  # noqa: PLC0415
 
-    rows = report.build(config.load_clusters(args.config), args.data, args.site)
+    specs = config.load_clusters(args.config)
+    rows = report.build(specs, args.data, args.site)
     for r in rows:
         if r["id"] in {c["name"] for c in wanted}:
             print(f"\n  {r['id']}: {r['verdict'].label}\n  {r['verdict'].reason}")
             print(configuration_lines(r["id"], args.data, recommend))
-    print(f"\n  the full report: {args.site / 'index.html'}")
+    print(f"\n  the full report: {report_link(specs, wanted)}")
     return 0
+
+
+def report_link(specs: list[dict], wanted: list[dict]) -> str:
+    """Where to open the report. It printed the site's path inside the container, and
+    `docker compose run --rm` had removed that container by the time anyone read it."""
+    base = next((s["report_url"] for s in specs if s.get("report_url")), None) \
+        or "http://localhost:8080"
+    return f"{base}/{wanted[0]['name']}/index.html" if len(wanted) == 1 else f"{base}/index.html"
 
 
 if __name__ == "__main__":

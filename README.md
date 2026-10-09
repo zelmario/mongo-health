@@ -122,7 +122,12 @@ docker compose run --rm collector onboard --group-id <atlas project id> --notify
 
 It lists the clusters in the project, warns if autoscaling is on (a tier change in the middle of
 the history mixes two machines), pulls everything Atlas still holds, and prints the first
-evaluation.
+evaluation and the link to the page. On a clean install that took 72 minutes for 20 days of an
+M10: 35 to fetch and 33 to analyse, on a busy host. The hourly round skips its slot while it
+runs.
+
+Add `--discover-only` to list the clusters and change nothing, and `--retention-days 30` (up to
+365) to keep the raw FTDC for another period than the page's default of 3 months.
 
 ### Self-managed: a connection string
 
