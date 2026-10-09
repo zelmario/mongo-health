@@ -193,7 +193,14 @@ class MemberPoller(threading.Thread):
                     client = client_for(self.uri, self.host)
                     writer = ftdcwrite.Writer(self.out, lambda: self._metadata(client),
                                               chunk_samples=chunk_for(self.interval))
-                raw = client.admin.command("getDiagnosticData", codec_options=RAW)["data"].raw
+                data = client.admin.command("getDiagnosticData", codec_options=RAW)["data"]
+                if "start" not in data:
+                    # A mongod that has just started has no sample of its own yet and answers
+                    # {}. Written, that was a chunk with no fields, and the decoder dropped the
+                    # whole file: everything the member said after a real restart, unread.
+                    self.stop.wait(max(0.0, self.interval - (time.monotonic() - started)))
+                    continue
+                raw = data.raw
                 taken = datetime.now(timezone.utc)
                 writer.add(raw, at=taken)
                 if self.resume_from is not None:
@@ -205,6 +212,14 @@ class MemberPoller(threading.Thread):
             except Exception as e:
                 self.status[self.host] = {**self.status.get(self.host, {}),
                                           "error": f"{type(e).__name__}: {str(e)[:200]}"}
+                # What was read before the error is kept. A new writer took the old one's place
+                # unflushed, and up to five minutes of samples before an outage went with it.
+                if writer is not None:
+                    try:
+                        writer.flush()
+                    except OSError:
+                        pass
+                    writer = None
                 if client is not None:
                     client.close()
                 client = None

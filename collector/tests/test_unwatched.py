@@ -143,3 +143,67 @@ def test_the_writer_knows_the_newest_sample_on_disk(tmp_path):
     assert w.written_through is None, "still in memory"
     w.flush()
     assert w.written_through == T0
+
+
+# ------------------------------------------------------------- what reaches the files at all
+
+class NoWait(threading.Event):
+    def wait(self, timeout=None):
+        return self.is_set()
+
+
+def run_member(tmp: Path, answers: list) -> list[tuple]:
+    """A MemberPoller over a fake member that answers `answers` in turn (a dict is a sample,
+    an exception is raised), then stops. Returns each data chunk as (fields, deltas)."""
+    from bson.raw_bson import RawBSONDocument  # noqa: PLC0415
+    stop = NoWait()
+    left = list(answers)
+
+    class Admin:
+        def command(self, name, **_):
+            if name != "getDiagnosticData":
+                return {}
+            if not left:
+                stop.set()
+                raise RuntimeError("done")
+            a = left.pop(0)
+            if isinstance(a, Exception):
+                raise a
+            return {"data": RawBSONDocument(bson.encode(a))}
+
+    class Client:
+        admin = Admin()
+        def close(self): pass
+
+    orig = poller.client_for
+    poller.client_for = lambda *a, **k: Client()
+    try:
+        m = poller.MemberPoller("mongodb://x/", "db1:27017", tmp / "m", stop, {}, 10)
+        m.run()
+    finally:
+        poller.client_for = orig
+    import struct, zlib  # noqa: E401, PLC0415
+    import ftdcfiles  # noqa: PLC0415
+    out = []
+    for f in sorted((tmp / "m").glob("metrics.*")):
+        for d in ftdcfiles._documents(f):
+            if d.get("type") == 1:
+                payload = zlib.decompress(bytes(d["data"])[4:])
+                ref = struct.unpack("<i", payload[:4])[0]
+                out.append(struct.unpack("<II", payload[ref:ref + 8]))
+    return out
+
+
+def s(i: int) -> dict:
+    return {"start": T0 + timedelta(seconds=10 * i), "serverStatus": {"uptime": float(i)}}
+
+
+def test_the_empty_answer_of_a_member_just_started_is_not_written(tmp_path):
+    chunks = run_member(tmp_path, [{}, s(1), s(2), s(3)])
+    assert chunks and all(fields > 0 for fields, _ in chunks)
+    assert sum(deltas + 1 for _, deltas in chunks) == 3
+
+
+def test_samples_read_before_an_error_are_kept(tmp_path):
+    chunks = run_member(tmp_path, [s(1), s(2), ConnectionError("gone"), s(3)])
+    assert sum(deltas + 1 for _, deltas in chunks) == 3

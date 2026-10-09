@@ -227,7 +227,12 @@ class Writer:
         # Named for its first sample, as mongod names its files: the capture reads that name as
         # when the file begins.
         self.directory.mkdir(parents=True, exist_ok=True)
-        name = "metrics." + first.strftime("%Y-%m-%dT%H-%M-%SZ") + "-00000"
-        self.path = self.directory / name
+        stem = "metrics." + first.strftime("%Y-%m-%dT%H-%M-%SZ")
+        # Never over another file: a writer that replaces one after a connection error, in the
+        # same second at 1 s, erased what the first had written. mongod numbers them the same way.
+        n = 0
+        while (self.directory / f"{stem}-{n:05d}").exists():
+            n += 1
+        self.path = self.directory / f"{stem}-{n:05d}"
         self.opened = now
         self.path.write_bytes(encode_metadata(self.metadata(), now))
