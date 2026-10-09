@@ -349,8 +349,8 @@ def interval_field(result: dict) -> str:
         <label class="pick">
           <input type="radio" name="interval" value="{seconds}"
                  {"checked" if seconds == poller.INTERVAL else ""}>
-          <span>Every {seconds} s <span class="meta">· {per_day:.2f} GB a day per member,
-            {total:.2f} GB for all {len(members)}{note}</span></span>
+          <span>Every {seconds} s <span class="meta">· {per_day:.2f} GB a day per member over
+            the network, {total:.2f} GB for all {len(members)}{note}</span></span>
         </label>""")
     return f"""
       <h2>How often to read it</h2>
@@ -361,6 +361,9 @@ def interval_field(result: dict) -> str:
           the network. Measured here: one sample is {each / 1024:.0f} KB compressed. A value
           that moves and comes back between two reads (a ticket pool emptied for three
           seconds) is only seen at one a second.</p>
+        <p class="hint">On disk it is far less, because FTDC keeps only what changed from one
+          sample to the next. An idle three-member PSMDB 8.0 replica set wrote about 40 MB a
+          member a day at 1 s, and 25 MB at 10 s.</p>
       </div>"""
 
 

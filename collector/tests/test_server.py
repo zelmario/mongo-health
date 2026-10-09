@@ -523,6 +523,7 @@ def test_the_interval_is_priced_with_the_clusters_own_sample(running, monkeypatc
                                          "retention_days": "60"})[2]
     assert 'value="10"\n                 checked' in body or 'value="10"' in body
     assert "0.29 GB a day per member" in body and "2.90 GB a day per member" in body
+    assert "per member over\n            the network" in body and "On disk it is far less" in body
     assert "for all 3" in body
     import re
     token = re.search(r'name="token" value="([^"]+)"', body).group(1)
