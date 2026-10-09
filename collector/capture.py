@@ -39,6 +39,8 @@ CAPTURING = "capturing.json"
 # The last capture's error, until one succeeds. Before the first capture the page had nothing
 # else to go on and said "Not being watched", after a download Atlas cut three times.
 CAPTURE_FAILED = "capture-failed.json"
+# Written by the page when it starts a round that has to wait for the lock (server.py).
+QUEUED = "queued.json"
 
 
 class CaptureMarker:
@@ -278,6 +280,7 @@ def main() -> int:
     failed = 0
     for spec in clusters:
         base = args.data / spec["cluster_id"]
+        (base / QUEUED).unlink(missing_ok=True)
         try:
             capture_cluster(spec, args.data, verbose=not args.quiet)
             (base / CAPTURE_FAILED).unlink(missing_ok=True)

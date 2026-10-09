@@ -102,7 +102,8 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
              captured: bool, days_held: float, analysed: bool = True,
              ends: datetime | None = None, analyzing: dict | None = None,
              arriving: dict | None = None, failed: dict | None = None,
-             capturing: dict | None = None, capture_failed: dict | None = None) -> Verdict:
+             capturing: dict | None = None, capture_failed: dict | None = None,
+             queued: dict | None = None) -> Verdict:
     """The verdict for one cluster.
 
     `silent_hours` is how long data has not been arriving, when that is past what is allowed
@@ -124,7 +125,19 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
     took 38 minutes for 20 days of an M10, and the page called the cluster unwatched all along.
     One sentence for every stage: the fetch builds and downloads a window of history after
     another, and the progress bar under this says which.
+
+    `queued` is set when the page started a round for this cluster that waits for another to
+    finish (report.queued). On the first clean install, an upload added behind an Atlas first
+    fetch waited 38 minutes for an analysis that took 6 seconds, under "a few minutes".
     """
+    if queued is not None:
+        if queued.get("behind"):
+            turn = (f"It waits for the first fetch of {queued['behind']} to finish: on an M10 "
+                    f"with 20 days one took about 40 minutes.")
+        else:
+            turn = "It starts when the collection round that is running finishes."
+    else:
+        turn = None
     if not captured and capturing:
         return Verdict("capturing", "Collecting everything Atlas still holds for this cluster, "
                                     "newest first: from a few days to several weeks of FTDC. "
@@ -144,13 +157,15 @@ def evaluate(findings: list[dict], now: datetime, silent_hours: float | None,
             # An upload read "Samples are arriving from 3 members" as if something sent them.
             n = arriving["members"]
             return Verdict("pending", f"Files from {n} member{'s' if n != 1 else ''} have "
-                                      f"arrived, but no check has run over them yet. This page "
-                                      f"updates when the analysis finishes.")
+                                      f"arrived, but no check has run over them yet. "
+                                      f"{turn or 'This page updates when the analysis finishes.'}")
         if arriving and arriving.get("members"):
             n = arriving["members"]
             return Verdict("waiting", f"Samples are arriving from {n} member"
-                                      f"{'s' if n != 1 else ''}. The first capture and "
-                                      f"analysis run within a few minutes.")
+                                      f"{'s' if n != 1 else ''}. "
+                                      f"{turn or 'The first capture and analysis run within a few minutes.'}")
+        if turn:
+            return Verdict("waiting", f"Nothing has been captured from this cluster yet. {turn}")
         return Verdict("unwatched", "Nothing has been captured from this cluster yet.")
     if analyzing:
         n = analyzing.get("files") or 0

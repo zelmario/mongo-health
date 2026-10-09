@@ -580,3 +580,17 @@ def test_a_bundle_cut_on_every_attempt_is_not_collected_again(monkeypatch):
     with pytest.raises(sources.requests.exceptions.ChunkedEncodingError):
         list(source.fetch(datetime(2026, 10, 2, 6, tzinfo=timezone.utc)))
     assert source.pending_job is None
+
+
+def test_a_cluster_is_no_longer_queued_once_its_turn_comes(monkeypatch, tmp_path):
+    import capture  # noqa: PLC0415
+    cfg = tmp_path / "config.json"
+    cfg.write_text(json.dumps({"clusters": [{"id": "case", "source": {"type": "onprem"}}]}))
+    base = tmp_path / "data" / "case"
+    base.mkdir(parents=True)
+    (base / capture.QUEUED).write_text("{}")
+    monkeypatch.setattr(capture, "capture_cluster", lambda *a, **k: None)
+    monkeypatch.setattr(sys, "argv", ["capture.py", "--config", str(cfg),
+                                      "--data", str(tmp_path / "data"), "--cluster", "case"])
+    assert capture.main() == 0
+    assert not (base / capture.QUEUED).exists()

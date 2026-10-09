@@ -96,6 +96,17 @@ class App:
         skipping left a cluster added a minute after another at "0 MB" until the next hour."""
         env = dict(os.environ, CONFIG=str(self.config_path), DATA=str(self.data),
                    SITE=str(self.site), LOCK_WAIT="1")
+        # Behind an Atlas first fetch that wait is most of an hour, and the page promised "a
+        # few minutes". Said to the report, which names what it waits for; capture.py clears it
+        # when the cluster's turn comes.
+        try:
+            with self._round_lock():
+                pass
+        except RoundRunning:
+            base = self.data / cluster_id
+            base.mkdir(parents=True, exist_ok=True)
+            (base / "queued.json").write_text(json.dumps(
+                {"since": self.clock().isoformat()}))
         command = [str(HERE / "run.sh"), "--cluster", cluster_id]
         if delay:
             command = ["sh", "-c", f'sleep {int(delay)}; exec "$0" "$@"', *command]

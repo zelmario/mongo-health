@@ -1426,6 +1426,21 @@ def capturing(base: Path, now: datetime) -> dict | None:
     return marker if (now - started).total_seconds() < CAPTURING_FOR_AT_MOST_HOURS * 3600 else None
 
 
+def queued(base: Path, data: Path, now: datetime) -> dict | None:
+    """A round the page started for this cluster that waits for the lock (server.py).
+
+    `behind` is the cluster whose first fetch holds it, when one does: on Atlas that is most of
+    an hour. None means an ordinary round, which takes minutes.
+    """
+    if read_json(base / "queued.json") is None:
+        return None
+    try:
+        others = sorted(d for d in data.iterdir() if d.is_dir() and d != base)
+    except OSError:
+        others = []
+    return {"behind": next((d.name for d in others if capturing(d, now)), None)}
+
+
 def newest_sample(state: dict, summary: dict | None = None) -> datetime | None:
     """The newest sample held, or, before there is an analysis, when files last arrived."""
     samples = [n.get("to") for n in (summary or {}).get("nodes") or [] if n.get("to")]
@@ -2311,7 +2326,9 @@ def page_index(rows: list[dict], now: datetime) -> str:
 
     items = []
     for r in rows:
-        if not r["captured"] and r["verdict"].state == "waiting":
+        if not r["captured"] and r.get("queued") and r["queued"]["behind"]:
+            state = f"queued behind the first fetch of {r['queued']['behind']}…"
+        elif not r["captured"] and r["verdict"].state == "waiting":
             state = "connected, first samples arriving…"
         elif not r["captured"] and r["verdict"].state == "pending":
             state = "files received, waiting for the first analysis…"
@@ -2440,6 +2457,7 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
     # What somebody marked as fixed no longer decides the verdict. What happens next does.
     ends = newest_sample(state, summary) if config.files_only(spec) and summary else None
     quiet = None if config.files_only(spec) else silent_hours(state, now, summary)
+    waits = queued(base, data, now)
     verdict = evaluate([f for f in findings if f["id"] not in settled], now, quiet,
                        bool(state.get("last_capture")),
                        float(summary.get("days_of_raw_ftdc") or 0),
@@ -2448,7 +2466,8 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
                        else arriving(base, uploaded=config.files_only(spec)),
                        failed=read_json(base / "analysis-failed.json"),
                        capturing=capturing(base, now),
-                       capture_failed=read_json(base / "capture-failed.json"))
+                       capture_failed=read_json(base / "capture-failed.json"),
+                       queued=None if state.get("last_capture") else waits)
     if state.get("source_kind") == "atlas" and state.get("files") \
             and state.get("history_done") is False and verdict.state not in BUSY:
         # A first capture comes window by window, newest first (sources.AtlasSource.history).
@@ -2510,6 +2529,7 @@ def build_cluster(spec: dict, data: Path, out: Path, now: datetime) -> dict:
         "megabytes": float(summary.get("megabytes") or 0),
         "recent": len(by_moment(list(recent))),
         "verdict": verdict,
+        "queued": waits if not state.get("last_capture") else None,
     }
 
 

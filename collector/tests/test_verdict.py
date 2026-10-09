@@ -128,6 +128,23 @@ def test_uploaded_files_are_not_samples_arriving():
     assert "Samples" not in v.reason
 
 
+def test_an_upload_queued_behind_a_first_fetch_names_it():
+    v = evaluate([], NOW, None, False, 0.0, arriving={"members": 3, "uploaded": True},
+                 queued={"behind": "orders-prod"})
+    assert v.state == "pending" and "first fetch of orders-prod" in v.reason
+
+
+def test_a_connection_queued_behind_a_round_does_not_promise_minutes():
+    v = evaluate([], NOW, None, False, 0.0, arriving={"members": 3}, queued={"behind": None})
+    assert v.state == "waiting" and "a few minutes" not in v.reason
+    assert "round that is running" in v.reason
+
+
+def test_a_queued_cluster_with_nothing_yet_is_waiting_not_unwatched():
+    v = evaluate([], NOW, None, False, 0.0, queued={"behind": "orders-prod"})
+    assert v.state == "waiting" and "orders-prod" in v.reason
+
+
 def test_a_poller_error_is_said_as_it_was_said():
     v = evaluate([], NOW, None, False, 0.0, arriving={"error": "Authentication failed."})
     assert v.state == "unwatched" and "Authentication failed." in v.reason

@@ -776,3 +776,17 @@ def test_an_eight_oh_capture_in_role_sections_keeps_its_members_apart(running):
     assert status == 200, r
     assert sorted(m["member"] for m in r["members"]) == list(names)
     assert sorted(g["member"] for g in r["logs"]) == ["ip-10-0-0-0", "ip-10-0-0-1"]
+
+
+def test_a_round_started_while_another_runs_is_marked_queued(tmp_path, monkeypatch):
+    """The page promised minutes while the round waited most of an hour behind a first fetch."""
+    lock = tmp_path / ".run.lock"
+    monkeypatch.setenv("LOCK", str(lock))
+    monkeypatch.setattr(server.subprocess, "Popen", lambda *a, **k: None)
+    app = server.App(tmp_path / "config.json", tmp_path / "data", tmp_path / "site", None,
+                     clock=lambda: NOW)
+    app._start_capture("free")
+    assert not (tmp_path / "data" / "free" / "queued.json").exists()
+    with server._flock(lock):
+        app._start_capture("case")
+    assert json.loads((tmp_path / "data" / "case" / "queued.json").read_text())["since"]

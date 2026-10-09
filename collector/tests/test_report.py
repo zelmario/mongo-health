@@ -428,6 +428,24 @@ def test_an_upload_waiting_for_its_first_analysis_says_files_not_samples(tmp_pat
     assert "Samples are arriving" not in index and "connected" not in index
 
 
+def test_an_upload_queued_behind_a_first_fetch_says_so(tmp_path):
+    base = tmp_path / "data" / "case"
+    (base / "incoming" / "db1_27017").mkdir(parents=True)
+    (base / "incoming" / "db1_27017" / "metrics.2026-10-01T18-19-48Z-00000").write_bytes(b"x")
+    (base / "queued.json").write_text(json.dumps({"since": NOW.isoformat()}))
+    atlas = tmp_path / "data" / "orders-prod"
+    atlas.mkdir(parents=True)
+    (atlas / "capturing.json").write_text(json.dumps({"started": NOW.isoformat(),
+                                                       "stage": "building"}))
+    specs = [{"cluster_id": c, "source": s, "mute": [], "notify": [], "retention_days": 30,
+              "report_url": None}
+             for c, s in (("case", {"type": "onprem"}),
+                          ("orders-prod", {"type": "atlas", "group_id": "x" * 24}))]
+    index = (build(tmp_path, specs) / "index.html").read_text()
+    assert "queued behind the first fetch of orders-prod" in index
+    assert "about 40 minutes" in index
+
+
 # ------------------------------------------------------------------ every time it happened
 
 MIN = 60_000
