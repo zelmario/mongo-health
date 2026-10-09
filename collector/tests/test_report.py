@@ -446,6 +446,16 @@ def test_an_upload_queued_behind_a_first_fetch_says_so(tmp_path):
     assert "about 40 minutes" in index
 
 
+def test_a_queue_marker_nobody_cleared_ages_out(tmp_path):
+    """A round that died before its capture left the page saying it waited, for ever."""
+    base = tmp_path / "data" / "case"
+    base.mkdir(parents=True)
+    (base / "queued.json").write_text(json.dumps({"since": (NOW - timedelta(hours=4)).isoformat()}))
+    assert report.queued(base, tmp_path / "data", NOW) is None
+    (base / "queued.json").write_text(json.dumps({"since": (NOW - timedelta(hours=1)).isoformat()}))
+    assert report.queued(base, tmp_path / "data", NOW) == {"behind": None}
+
+
 # ------------------------------------------------------------------ every time it happened
 
 MIN = 60_000

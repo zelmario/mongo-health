@@ -207,3 +207,8 @@ def test_the_empty_answer_of_a_member_just_started_is_not_written(tmp_path):
 def test_samples_read_before_an_error_are_kept(tmp_path):
     chunks = run_member(tmp_path, [s(1), s(2), ConnectionError("gone"), s(3)])
     assert sum(deltas + 1 for _, deltas in chunks) == 3
+
+
+def test_unknown_uptime_leaves_the_outage_standing(tmp_path):
+    rec = member(tmp_path, T0).own_gap(bson.encode({"x": 1}), T0 + timedelta(seconds=80))
+    assert rec is None and not (tmp_path / poller.UNWATCHED).exists()

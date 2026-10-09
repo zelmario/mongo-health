@@ -173,7 +173,8 @@ class MemberPoller(threading.Thread):
         if gap <= 2 * self.interval:
             return None
         up = uptime_of(raw)
-        if up is not None and up < gap:
+        # Unknown uptime is not proof the member stayed up: its outage stands.
+        if up is None or up < gap:
             return None
         record = {"member": member_dir(self.host), "from": start.isoformat(),
                   "to": now.isoformat(), "uptime": up}
@@ -298,9 +299,12 @@ class ClusterPoller:
                                    "members": self.status}, indent=2, sort_keys=True))
         tmp.replace(self.base / "status.json")
 
-    def stop(self) -> None:
-        for t, event in self.members.values():
+    def signal_stop(self) -> None:
+        for _, event in self.members.values():
             event.set()
+
+    def stop(self) -> None:
+        self.signal_stop()
         for t, _ in self.members.values():
             t.join(timeout=self.interval * 2 + TIMEOUT_MS / 1000)
 
@@ -356,6 +360,10 @@ def main() -> int:
     try:
         return _poll(args, running)
     finally:
+        # Every member told first, then waited for: one at a time, a member stuck in a call
+        # used Docker's grace before the others flushed (compose gives the poller 30 s).
+        for p in running.values():
+            p.signal_stop()
         for p in running.values():
             p.stop()
             p.write_status()

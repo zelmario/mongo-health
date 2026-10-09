@@ -92,7 +92,9 @@ exec 9>"$LOCK"
 # has just added, who is looking at the page and would otherwise wait for the next hour.
 if [ -n "${LOCK_WAIT:-}" ]; then
   flock 9
-elif ! flock -n 9; then
+# Five seconds, not none: the page tests the lock by taking it for an instant (server.py
+# _start_capture), and a round that tried at that instant skipped its whole hour.
+elif ! flock -w 5 9; then
   say "another run is still going (lock: $LOCK) — skipping this slot"
   exit 0
 fi

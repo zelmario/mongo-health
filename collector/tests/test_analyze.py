@@ -561,3 +561,15 @@ def test_a_routine_run_takes_nothing_back(tmp_path, monkeypatch):
     stub_engine(monkeypatch, engine_output(findings=[]))
     analyze_cluster(spec, tmp_path / "data", verbose=False)
     assert len(_held(tmp_path)) == 1
+
+
+def test_a_finding_held_twice_under_one_id_keeps_one_copy(tmp_path):
+    """Filtered by id, the copy kept went with the repeat, and the incident left findings.jsonl."""
+    import analyze  # noqa: PLC0415
+    row = {"id": "a", "rule": "r", "node": "n", "fromMs": 0, "toMs": 1000,
+           "worstFromMs": 0, "worstToMs": 1000, "detected_at": "2026-10-01T00:00:00+00:00"}
+    (tmp_path / "findings.jsonl").write_text(json.dumps(row) + "\n" + json.dumps(row) + "\n")
+    gone = analyze.collapse_duplicates(tmp_path, "2026-10-09T00:00:00+00:00")
+    held = (tmp_path / "findings.jsonl").read_text().splitlines()
+    assert len(held) == 1 and json.loads(held[0])["id"] == "a"
+    assert "a" not in gone, "still reported: the copy kept is the one somebody was told about"

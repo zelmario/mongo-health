@@ -335,12 +335,14 @@ def collapse_duplicates(base: Path, stamp: str) -> set[str]:
                                                "reported earlier"))
     if gone:
         append(base / "retracted.jsonl", gone)
-        ids = {r["id"] for r in gone}
+        # The rows kept, in the order they were held. Filtered by id instead, a row held twice
+        # under one id went with its own repeat, and the incident left findings.jsonl.
+        kept = {id(r) for r in keep}
         tmp = path.with_name(f".{path.name}.tmp")
         tmp.write_text("".join(json.dumps(r, sort_keys=True) + "\n"
-                               for r in rows if r["id"] not in ids))
+                               for r in rows if id(r) in kept))
         tmp.replace(path)
-    return {r["id"] for r in gone}
+    return {r["id"] for r in gone} - {r["id"] for r in keep}
 
 
 def append(path: Path, rows: list[dict]) -> None:

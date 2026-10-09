@@ -1365,6 +1365,7 @@ ANALYZING_FOR_AT_MOST_HOURS = 6
 # Atlas gets half an hour to build the first bundle (sources.BOOTSTRAP_TIMEOUT) and the download
 # ten minutes; past twice that, the marker is from a run that was killed.
 CAPTURING_FOR_AT_MOST_HOURS = 2
+QUEUED_FOR_AT_MOST_HOURS = 3
 
 
 def read_json(path: Path) -> dict | None:
@@ -1432,7 +1433,14 @@ def queued(base: Path, data: Path, now: datetime) -> dict | None:
     `behind` is the cluster whose first fetch holds it, when one does: on Atlas that is most of
     an hour. None means an ordinary round, which takes minutes.
     """
-    if read_json(base / "queued.json") is None:
+    marker = read_json(base / "queued.json")
+    try:
+        since = datetime.fromisoformat(marker["since"].replace("Z", "+00:00"))
+    except (TypeError, KeyError, ValueError, AttributeError):
+        return None
+    # A round that died before its capture never cleared it. Behind the longest first fetch
+    # measured (72 minutes) a real wait is well inside this.
+    if (now - since).total_seconds() > QUEUED_FOR_AT_MOST_HOURS * 3600:
         return None
     try:
         others = sorted(d for d in data.iterdir() if d.is_dir() and d != base)

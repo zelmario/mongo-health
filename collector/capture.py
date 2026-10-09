@@ -120,10 +120,13 @@ def drop_from_incoming(finished: list[tuple[Path, Path]]) -> int:
     file of each member stays: the poller may still be writing it.
     """
     dropped = 0
+    newest: dict[Path, Path | None] = {}
     for path, stored in finished:
-        # metrics.interim sorts after every dated name and is rewritten in place; it stays.
-        dated = [p for p in path.parent.glob("metrics.*") if p.name != "metrics.interim"]
-        if path.name == "metrics.interim" or path == max(dated, default=None):
+        if path.parent not in newest:
+            # metrics.interim sorts after every dated name and is rewritten in place; it stays.
+            dated = [p for p in path.parent.glob("metrics.*") if p.name != "metrics.interim"]
+            newest[path.parent] = max(dated, default=None)
+        if path.name == "metrics.interim" or path == newest[path.parent]:
             continue
         try:
             if stored.stat().st_size == path.stat().st_size:

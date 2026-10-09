@@ -9,7 +9,7 @@ only the second way writes it into the config.
 
 The point is to see something the same day. Atlas holds days to weeks of FTDC
 right now (20 days on an idle M10), and the moment a read-only key reaches it that
-history is kept — so the first run pulls **all of it** rather than starting from zero
+history is kept, so the first run pulls **all of it** rather than starting from zero
 and waiting a week for the graphs to mean anything.
 
 That single fetch is small: measured at 0.6 GB for an idle three-node cluster, 1.4 GB under
@@ -36,6 +36,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 import requests
 from requests.auth import HTTPDigestAuth
@@ -263,7 +264,8 @@ def report_link(specs: list[dict], wanted: list[dict]) -> str:
     `docker compose run --rm` had removed that container by the time anyone read it."""
     base = next((s["report_url"] for s in specs if s.get("report_url")), None) \
         or "http://localhost:8080"
-    return f"{base}/{wanted[0]['name']}/index.html" if len(wanted) == 1 else f"{base}/index.html"
+    name = quote(wanted[0]["name"], safe="")
+    return f"{base}/{name}/index.html" if len(wanted) == 1 else f"{base}/index.html"
 
 
 if __name__ == "__main__":

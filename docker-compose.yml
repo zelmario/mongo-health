@@ -31,6 +31,8 @@ services:
     image: mongo-health
     pull_policy: never
     command: poll
+    # Time to write each member's samples still in memory when it is stopped (poller.py main).
+    stop_grace_period: 30s
     restart: unless-stopped
     env_file:
       - path: .env

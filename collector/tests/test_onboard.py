@@ -246,3 +246,4 @@ def test_the_report_is_pointed_at_where_it_is_served():
         "http://localhost:8080/c1/index.html"
     assert onboard.report_link([{"report_url": "https://r.example.com"}], one + [{"name": "c2"}]) \
         == "https://r.example.com/index.html"
+    assert onboard.report_link([{}], [{"name": "a#b"}]) == "http://localhost:8080/a%23b/index.html"
