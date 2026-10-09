@@ -15,6 +15,7 @@ services:
   collector:
     build: .
     image: mongo-health
+    pull_policy: never
     restart: unless-stopped
     env_file:
       - path: .env
@@ -28,6 +29,7 @@ services:
   # seconds, and writes them as FTDC for the collector to pick up.
   poller:
     image: mongo-health
+    pull_policy: never
     command: poll
     restart: unless-stopped
     env_file:
@@ -41,6 +43,7 @@ services:
 
   ui:
     image: mongo-health
+    pull_policy: never
     command: serve
     restart: unless-stopped
     env_file:
