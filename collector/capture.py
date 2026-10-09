@@ -110,6 +110,30 @@ def record_usage(base: Path, **fields) -> None:
         fh.write(json.dumps(line, sort_keys=True) + "\n")
 
 
+def drop_from_incoming(finished: list[tuple[Path, Path]]) -> int:
+    """Our own incoming copy of each file that stopped growing and is stored, deleted.
+
+    incoming/ is where the poller writes and uploads are unpacked; capture copies from it into
+    ftdc/, and nothing ever deleted the original. On the first clean install a cluster read
+    every 10 s held each file twice, about 75 MB a day for three members that the page never
+    counted, and prune, which reads ftdc/, kept the second copy past any retention. The newest
+    file of each member stays: the poller may still be writing it.
+    """
+    dropped = 0
+    for path, stored in finished:
+        # metrics.interim sorts after every dated name and is rewritten in place; it stays.
+        dated = [p for p in path.parent.glob("metrics.*") if p.name != "metrics.interim"]
+        if path.name == "metrics.interim" or path == max(dated, default=None):
+            continue
+        try:
+            if stored.stat().st_size == path.stat().st_size:
+                path.unlink()
+                dropped += 1
+        except OSError:
+            continue
+    return dropped
+
+
 def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
     cluster_id = spec["cluster_id"]
     base = root / cluster_id
@@ -117,7 +141,8 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
     state = State.load(base / "state.json", cluster_id)
 
     marker = None
-    if spec["source"].get("type") in ("onprem", "mongodb"):
+    ours = spec["source"].get("type") in ("onprem", "mongodb")
+    if ours:
         # A server of your own: poller.py writes what the members report as FTDC under
         # incoming/, uploaded files are unpacked beside it member by member, and from here on
         # it is a directory like any other.
@@ -155,6 +180,7 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
     new = skipped = new_bytes = 0
     nodes: set[str] = set()
     offered: set[str] = set()
+    finished: list[tuple[Path, Path]] = []  # (incoming copy, stored copy) of a file done growing
 
     if verbose:
         print(f"[{cluster_id}] {source.describe()}")
@@ -176,6 +202,8 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
                 # file finished growing, which is what lets the date-filter anchor move forward.
                 state.seen_unchanged(f.node, f.name, size)
                 skipped += 1
+                if ours:
+                    finished.append((f.path, ftdc / f.node / f.name))
                 continue
 
             target = ftdc / f.node / f.name
@@ -190,6 +218,7 @@ def capture_cluster(spec: dict, root: Path, verbose: bool = True) -> dict:
         # A pruned file the source no longer offers cannot come back, so its record can go.
         # Only after a complete pass: a run that failed half way saw only some of them.
         state.pruned = {k: v for k, v in state.pruned.items() if k in offered}
+        drop_from_incoming(finished)
     finally:
         if marker is not None:
             marker.clear()

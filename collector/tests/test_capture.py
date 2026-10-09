@@ -594,3 +594,26 @@ def test_a_cluster_is_no_longer_queued_once_its_turn_comes(monkeypatch, tmp_path
                                       "--data", str(tmp_path / "data"), "--cluster", "case"])
     assert capture.main() == 0
     assert not (base / capture.QUEUED).exists()
+
+
+def test_our_incoming_copy_goes_once_the_file_is_stored_and_done(tmp_path: Path):
+    """incoming/ held every polled file twice, for ever: prune only reads ftdc/."""
+    older, newer = "metrics.2026-10-09T16-15-34Z-00000", "metrics.2026-10-09T17-27-07Z-00000"
+    member = tmp_path / "data" / "lab" / "incoming" / "db1_27017"
+    member.mkdir(parents=True)
+    for name in (older, newer, "metrics.interim"):
+        (member / name).write_bytes(b"x" * 100)
+    spec = {"cluster_id": "lab", "notify": [], "source": {"type": "onprem", "uri": "mongodb://x/"}}
+    capture_cluster(spec, tmp_path / "data", verbose=False)
+    assert len(list(member.iterdir())) == 3, "stored, but not yet seen to stop growing"
+    capture_cluster(spec, tmp_path / "data", verbose=False)
+    assert sorted(p.name for p in member.iterdir()) == [newer, "metrics.interim"]
+    assert (tmp_path / "data" / "lab" / "ftdc" / "db1_27017" / older).stat().st_size == 100
+
+
+def test_a_folder_source_is_never_cleaned(tmp_path: Path):
+    """Those files are somebody else's."""
+    src = make_source_dir(tmp_path, {"n0": [(NAME, 1000), ("metrics.2026-08-08T01-15-12Z-00000", 10)]})
+    for _ in range(2):
+        capture_cluster(spec_for(src), tmp_path / "data", verbose=False)
+    assert len(list(src.rglob("metrics.*"))) == 2
