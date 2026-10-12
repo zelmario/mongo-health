@@ -245,6 +245,11 @@ class AtlasSource:
     # Past this, stop looking: Atlas keeps days to a few weeks, and a gap this long means the
     # oldest file is gone, not that the next window would find more.
     HISTORY_MAX_AGE = timedelta(days=60)
+    # A window with nothing in it is the end of the history, or a hole in it: a member down
+    # for days, a cluster paused. One more window this long, older than the empty one, tells
+    # them apart before we stop. A hole longer than the two windows together still ends the
+    # walk there. In the usual case it costs one more job, about five minutes.
+    HISTORY_PROBE_WINDOW = timedelta(days=14)
 
     def history(self, before: datetime | None) -> Iterator[FTDCFile]:
         """Everything Atlas holds older than `before` (None: older than now), window by window.
@@ -264,6 +269,7 @@ class AtlasSource:
 
     def _history(self, now_: datetime, to: datetime, span: timedelta) -> Iterator[FTDCFile]:
         days = lambda t: round((now_ - t).total_seconds() / 86_400, 2)  # noqa: E731
+        probing = False
         while now_ - to < self.HISTORY_MAX_AGE:
             if self.history_job and self.pending_window:
                 start, to = self.pending_window
@@ -311,8 +317,15 @@ class AtlasSource:
             # three first fetches walked on to the 60-day limit, four jobs past its 20 days. Only
             # a file opened before the window ends can hold a sample from it.
             if not any((t := timestamp_of(p.name)) is not None and t < to for p in paths):
-                self.history_done = True
-                return
+                if probing:
+                    self.history_done = True
+                    return
+                # Not claimed as collected: history_before stays at the last window with data,
+                # so a run stopped during the probe does not record a hole as history.
+                probing = True
+                span, to = self.HISTORY_PROBE_WINDOW, start
+                continue
+            probing = False
             self.history_before = start
             # Sized from what this window weighed, per second of history it covered.
             per_second = size / max((to - start).total_seconds(), 1)

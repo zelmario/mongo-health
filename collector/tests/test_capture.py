@@ -460,8 +460,10 @@ def _bundle(path: Path, names: list[str], size: int = 1000) -> None:
             t.addfile(info, io.BytesIO(data))
 
 
-def _history_source(monkeypatch, oldest: datetime, cut_above: timedelta | None = None):
-    """An AtlasSource whose jobs return one file per day in the window, back to `oldest`."""
+def _history_source(monkeypatch, oldest: datetime, cut_above: timedelta | None = None,
+                    hole: tuple[datetime, datetime] | None = None):
+    """An AtlasSource whose jobs return one file per day in the window, back to `oldest`,
+    except inside `hole` (from, to), where no file was opened."""
     ordered = []
     source = AtlasSource("g", "rs", "pub", "priv")
 
@@ -477,12 +479,14 @@ def _history_source(monkeypatch, oldest: datetime, cut_above: timedelta | None =
         days = []
         d = end
         while d > start and d > oldest:
-            days.append(d.strftime("metrics.%Y-%m-%dT%H-%M-%SZ-00000"))
+            if not (hole and hole[0] < d < hole[1]):
+                days.append(d.strftime("metrics.%Y-%m-%dT%H-%M-%SZ-00000"))
             d -= timedelta(days=1)
         # Past the history, Atlas sends the oldest file it holds rather than nothing, and the
-        # interim with every bundle, whatever the dates asked for.
-        padding = [] if days else [(oldest + timedelta(hours=1)).strftime(
-            "metrics.%Y-%m-%dT%H-%M-%SZ-00000")]
+        # interim with every bundle, whatever the dates asked for. Inside a hole, assumed the
+        # same: the first file opened after it (unverified against Atlas).
+        after = hole[1] + timedelta(hours=1) if hole and end <= hole[1] else oldest + timedelta(hours=1)
+        padding = [] if days else [after.strftime("metrics.%Y-%m-%dT%H-%M-%SZ-00000")]
         _bundle(target, days + padding + ["metrics.interim"])
 
     monkeypatch.setattr(source, "_create_job", create)
@@ -504,10 +508,29 @@ def test_the_history_comes_newest_first_and_stops_at_an_empty_window(monkeypatch
         "each window ends where the one after it starts: no gap, newest first"
     assert ordered[0][1] - ordered[0][0] == AtlasSource.HISTORY_FIRST_WINDOW
     assert source.history_done
-    assert sum(end <= oldest for _, end in ordered) == 1, \
-        "a window of files opened after it ends is the end, not a reason to walk on to 60 days"
+    assert sum(end <= oldest for _, end in ordered) == 2, \
+        "a window of files opened after it ends, and one probe past it, is the end, " \
+        "not a reason to walk on to 60 days"
+    assert ordered[-1][1] - ordered[-1][0] == AtlasSource.HISTORY_PROBE_WINDOW
     assert source.history_before > oldest - AtlasSource.HISTORY_MAX_WINDOW, \
         "and no history is claimed past the last window that had any"
+
+
+def test_a_hole_in_the_history_does_not_end_the_first_fetch(monkeypatch):
+    """A member down for days, or a paused cluster, leaves a window with no file opened in it.
+    The first fetch stopped there and never collected the history older than the hole."""
+    now_ = datetime.now(timezone.utc)
+    oldest = now_ - timedelta(days=25)
+    # Longer than a whole window: the second window, 2 to 16 days back, falls inside it.
+    hole = (now_ - timedelta(days=18), now_ - timedelta(days=1, hours=12))
+    source, ordered = _history_source(monkeypatch, oldest=oldest, hole=hole)
+    names = [f.name for f in source.history(None)]
+
+    stamps = [t for n in names if (t := sources.timestamp_of(n)) is not None]
+    assert any(t < hole[0] for t in stamps), "the days older than the hole are collected"
+    assert source.history_done
+    assert source.history_before < hole[0]
+    assert sum(end <= oldest for _, end in ordered) == 2, "and the end is still found"
 
 
 def test_each_window_tells_the_page_which_days_it_holds(monkeypatch):
