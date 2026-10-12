@@ -274,9 +274,8 @@ The full run takes one to three minutes.
 
 ## Feedback and contributing
 
-This is a work in progress, preparing for its first public release. Open an issue at
-<https://github.com/zelmario/mongo-health/issues> for anything that failed, read wrong or
-confused you. A screenshot of the page helps.
+Open an issue at <https://github.com/zelmario/mongo-health/issues> for anything that failed,
+read wrong or confused you. A screenshot of the page helps.
 
 The most useful feedback is FTDC from a case the checks missed or got wrong, with a line on
 what really happened. That is how most of the rules here were written. Pull requests are
