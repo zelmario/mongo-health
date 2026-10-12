@@ -224,24 +224,25 @@ export function episodesOf(
   const worse = (a: number, b: number): number =>
     op === '<=' ? Math.min(a, b) : Math.max(a, b);
 
-  // The usual interval between samples, from the middle of the sorted gaps so that the holes
-  // themselves cannot drag it upwards. Computed rather than taken from the first pair: a
-  // capture that begins right before an interruption would otherwise adopt the interruption
-  // as its normal.
-  const intervals: number[] = [];
-  for (let i = 1; i < t.length; i++) intervals.push(t[i]! - t[i - 1]!);
-  intervals.sort((a, b) => a - b);
-  const step = intervals.length > 0 ? Math.max(1, intervals[Math.floor(intervals.length / 2)]!) : 1;
+  // The usual interval between samples AT EACH POINT, from the middle of the sorted gaps of its
+  // block so that the holes themselves cannot drag it upwards. Computed rather than taken from
+  // the first pair: a capture that begins right before an interruption would otherwise adopt
+  // the interruption as its normal.
+  //
+  // Per block, not one for the whole series: a member polled at 1 s and then at 5 s took the
+  // 1 s median over everything, every 5 s interval after the change read as a hole, and no
+  // rule with a sustain could fire on that member until the 1 s files aged out.
+  const steps = localSteps(t);
+  const stepAt = (i: number): number => steps[Math.min(Math.max(i, 1), steps.length - 1)] ?? 1;
 
-  // Past this, the samples either side are not consecutive: the collector stopped, the host
-  // was suspended, the file rotated. What happened in between is UNKNOWN, and an episode may
-  // not be carried across it.
+  // Past twice the local step, the samples either side are not consecutive: the collector
+  // stopped, the host was suspended, the file rotated. What happened in between is UNKNOWN,
+  // and an episode may not be carried across it.
   //
   // This is the difference between "the ticket pool was saturated for 35 minutes" and "for
   // 5.9 hours". Measured against a soak run with a known timeline, checkpoint findings were
   // reporting 638 minutes for a 3-minute incident -- 200x -- because a single sample before a
   // four-hour suspension claimed the whole suspension as time in state.
-  const disconnected = step * 2;
 
   const out: Episode[] = [];
   let start = -1; // first in-breach sample of the open episode
@@ -262,7 +263,7 @@ export function episodesOf(
   for (let i = 0; i <= t.length; i++) {
     // A jump in the clock is a hole even when both samples are readable: the collector was not
     // running in between, so there is no evidence about what the metric did.
-    const jumped = i > 0 && i < t.length && t[i]! - t[i - 1]! > disconnected;
+    const jumped = i > 0 && i < t.length && t[i]! - t[i - 1]! > 2 * stepAt(i);
     const gapHere = i >= t.length || Number.isNaN(guard[i]!) || jumped;
     if (gapHere) {
       // A hole in the capture, or the end of it. Neither is evidence either way.
@@ -274,7 +275,7 @@ export function episodesOf(
           start = i;
           last = i;
           peak = Number.isNaN(extreme[i]!) ? guard[i]! : extreme[i]!;
-          inStateMs = step;
+          inStateMs = stepAt(i + 1);
         }
       }
       continue;
@@ -287,6 +288,7 @@ export function episodesOf(
       // The interval this sample stands for, CAPPED at the usual step. Uncapped, the last
       // sample before an interruption claimed the whole interruption -- which is how three
       // minutes of slow checkpoints became ten hours.
+      const step = stepAt(i + 1);
       const ahead = i + 1 < t.length ? t[i + 1]! - t[i]! : step;
       inStateMs += Math.min(ahead, step);
       last = i;
@@ -297,6 +299,33 @@ export function episodesOf(
     if (start >= 0 && t[i]! - t[last]! > toleranceMs) close();
   }
 
+  return out;
+}
+
+/** Intervals per block when finding the usual step; see `localSteps`. */
+const STEP_BLOCK = 32;
+
+/**
+ * The usual sampling interval in force at each point of `t`: `out[i]` is the step for the
+ * interval that ends at sample `i` (`out[0]` repeats `out[1]`).
+ *
+ * The lower median of the block of STEP_BLOCK intervals that holds it. A hole is one interval
+ * in its block and cannot move the median; a change of polling interval moves it from the first whole
+ * block after the change, so at most one block straddles the two clocks. Never below 1 ms.
+ */
+function localSteps(t: Float64Array): Float64Array {
+  const out = new Float64Array(Math.max(t.length, 1)).fill(1);
+  const n = t.length - 1; // intervals
+  for (let from = 1; from <= n; from += STEP_BLOCK) {
+    const to = Math.min(from + STEP_BLOCK, n + 1);
+    // A short last block is measured over the last whole block's worth of intervals: two
+    // intervals, one of them a hole, would otherwise make the hole the usual step.
+    const block: number[] = [];
+    for (let i = Math.max(1, to - STEP_BLOCK); i < to; i++) block.push(t[i]! - t[i - 1]!);
+    block.sort((a, b) => a - b);
+    out.fill(Math.max(1, block[Math.floor((block.length - 1) / 2)]!), from, to);
+  }
+  if (t.length > 1) out[0] = out[1]!;
   return out;
 }
 

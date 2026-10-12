@@ -59,6 +59,42 @@ describe('finding episodes in a series', () => {
     expect(episodes[1]).toEqual({ fromMs: 30_000, toMs: 40_000, peak: 0, inStateMs: 20_000 });
   });
 
+  /**
+   * A member polled at 1 s and then at 5 s. With one step for the whole series, the 1 s half
+   * set it, every 5 s interval read as a hole, and three injected incidents on the lab (slow
+   * checkpoints, oplog churn, cache reads) produced no finding at all.
+   */
+  describe('after the polling interval changes', () => {
+    const ones = Array.from({ length: 64 }, (_, i) => i); // 0..63 s at 1 s
+    const fives = Array.from({ length: 40 }, (_, i) => 65 + i * 5); // 65..260 s at 5 s
+    const t = at(...ones, ...fives);
+    const v = f(...ones.map(() => 0), ...fives.map(() => 30));
+
+    it('reads the new interval as the usual step, not as a hole', () => {
+      const episodes = episodesOf(t, v, v, '>=', 20, 120_000);
+      expect(episodes).toHaveLength(1);
+      expect(episodes[0]!.fromMs).toBe(65_000);
+      expect(episodes[0]!.toMs).toBe(260_000);
+    });
+
+    it('still breaks a run at a real hole in the new interval', () => {
+      // A minute with no samples in the middle of the 5 s stretch.
+      const holed = at(...ones, ...fives.map((s) => (s >= 160 ? s + 60 : s)));
+      const episodes = episodesOf(holed, v, v, '>=', 20, 60_000);
+      expect(episodes).toHaveLength(2);
+      expect(episodes[0]!.toMs).toBe(155_000);
+      expect(episodes[1]!.fromMs).toBe(220_000);
+    });
+  });
+
+  it('does not take a hole at the very end for the usual step', () => {
+    // 40 samples at 1 s, a 60 s hole, one last sample: the last block holds the hole.
+    const t = at(...Array.from({ length: 40 }, (_, i) => i), 99);
+    const v = f(...Array.from({ length: 41 }, () => 30));
+    const [episode] = episodesOf(t, v, v, '>=', 20, 10_000);
+    expect(episode!.toMs).toBe(39_000);
+  });
+
   it('reports the worst value reached, not the one that triggered it', () => {
     const t = at(0, 10, 20, 30);
     const guard = f(100, 100, 100, 10);
