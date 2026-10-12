@@ -1,8 +1,9 @@
 # mongo-health
 
-Is my MongoDB cluster healthy? mongo-health keeps your FTDC past Atlas's retention, reads
-every second of it with the [Big Hole](https://github.com/zelmario/Big-hole) rules, and gives
-you one verdict per replica set, with the evidence behind it.
+Is my MongoDB cluster healthy? mongo-health reads every second of FTDC from your replica sets,
+self-managed or on MongoDB Atlas, checks it with the [Big Hole](https://github.com/zelmario/Big-hole)
+rules every hour, and gives you one verdict per replica set, with the evidence behind it. It keeps
+the FTDC past the few days `mongod` and Atlas hold it.
 
 ![The front page: one verdict per cluster](docs/images/front-page.png)
 
@@ -44,9 +45,25 @@ For each replica set you get:
 5. **What normal looks like for this cluster.** Typical, busy and worst values for each key
    metric, so a later alert is judged against the cluster's own behaviour.
 
-The checks: 38 threshold rules, 9 detectors and 13 configuration checks. Each one, with what it
-looks at and why at that threshold, is in [docs/rules.md](docs/rules.md). What they do not cover
-yet is in [docs/coverage.md](docs/coverage.md).
+### The checks
+
+68 checks: 44 threshold rules, 11 detectors and 13 configuration checks. Most are a threshold on a
+metric held for a minimum time. The detectors look at a pattern across members or across time.
+
+| Group | Checks | Examples |
+| --- | ---: | --- |
+| Configuration | 13 | No TLS or no authorization on a public bind address, transparent huge pages, ulimits, cache too large for the host, a version past end of support, mixed versions |
+| Queries and workload | 10 | Queries scanning far more than they return, sorts spilling to disk, write conflicts, cursors piling up, TTL deletions running hot |
+| Cache and memory | 9 | Dirty cache above the eviction trigger, application threads doing eviction, swapping, old document versions filling the cache |
+| Events | 8 | Node stopped reporting, member restarted, rolling restart, election, one member unlike the others, a setting changed |
+| Replication | 7 | Member falling behind, flow control throttling writes, oplog window under a day, oplog growing faster than the workload explains |
+| Connections and network | 7 | Connections near the limit, packets retransmitted, connection storms, the server answering fast while clients wait |
+| Concurrency and queues | 6 | Read or write tickets saturated or exhausted, read or write queue building |
+| Storage | 5 | Checkpoints running long, slow disk reads or writes, data disk running out of space |
+| Against the cluster's own history | 3 | A metric beyond anything this cluster did before, a resource that will run out at its current growth, a cluster larger than its workload needs |
+
+Each one, with what it looks at and why at that threshold, is in [docs/rules.md](docs/rules.md).
+What they do not cover yet is in [docs/coverage.md](docs/coverage.md).
 
 ![An incident: read ticket pool saturated](docs/images/incident.png)
 
